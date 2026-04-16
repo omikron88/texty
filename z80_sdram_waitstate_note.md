@@ -32,3 +32,15 @@ Proto bez vložení wait stavů nebo bez mezivrstvy (cache/prefetch/line-buffer)
 - Pro Z80 bus přidat `WAIT` generátor (vázaný na `cpu_ready`).
 - Nebo mezi Z80 a SDRAM dát rychlý buffer (např. BRAM stránku), který se doplňuje na pozadí.
 - Pokud je nutný režim bez wait, pak jen pro striktně omezené mapované oblasti s garantovanou lokální RAM.
+
+## Varianta bez `sdram_manager` (CPU je jediný klient)
+
+V tomto případě se situace výrazně zlepší, protože odpadne arbitráž s video portem.
+
+- Přibližná latence read cesty v aktuálním FSM vychází na jednotky až nízké desítky cyklů 133MHz domény (typicky pod ~100 ns, podle zarovnání stavů).
+- I s občasným zdržením kvůli refresh (`tRFC=10` => ~75 ns) se součet typicky stále vejde do okna Z80 čtení při 3.5 MHz.
+
+Praktický závěr:
+
+- **Ano, je reálné** jet bez wait stavů, pokud je CPU jediný uživatel SDRAM a je dobře navržené časování rozhraní mezi Z80 a řadičem.
+- **Přesto doporučuji** mít možnost wait stav vložit jako pojistku (např. při hraničním PVT, jiném mapování, nebo rozšíření návrhu do budoucna).

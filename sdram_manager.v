@@ -30,12 +30,20 @@ module sdram_manager #(
     input  wire                  sdram_ready
 );
 
-    localparam [1:0]
-        GRANT_NONE = 2'd0,
-        GRANT_CPU  = 2'd1,
-        GRANT_VID  = 2'd2;
+    localparam [2:0]
+        ST_IDLE            = 3'd0,
+        ST_CPU_WAIT        = 3'd1,
+        ST_VID_WAIT        = 3'd2,
+        ST_PREFETCH_WAIT   = 3'd3;
 
-    reg [1:0] grant;
+    reg [2:0] state;
+    reg [ADDR_WIDTH-1:0] vid_addr_pending;
+
+    // Cache one 16-bit word (two neighboring bytes differing in A0).
+    reg [ADDR_WIDTH-2:0] pair_word_addr;
+    reg [7:0]            pair_byte_lo;
+    reg [7:0]            pair_byte_hi;
+    reg                  pair_valid;
 
     always @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
@@ -49,34 +57,91 @@ module sdram_manager #(
             vid_data_out <= 8'h00;
             vid_ready <= 1'b0;
 
-            grant <= GRANT_NONE;
+            state <= ST_IDLE;
+            vid_addr_pending <= {ADDR_WIDTH{1'b0}};
+            pair_word_addr <= {(ADDR_WIDTH-1){1'b0}};
+            pair_byte_lo <= 8'h00;
+            pair_byte_hi <= 8'h00;
+            pair_valid <= 1'b0;
         end else begin
             cpu_ready <= 1'b0;
             vid_ready <= 1'b0;
             sdram_read_in <= 1'b0;
             sdram_write_in <= 1'b0;
 
-            if (grant == GRANT_NONE) begin
-                if (vid_read_in) begin
-                    grant <= GRANT_VID;
-                    sdram_addr_in <= vid_addr_in;
-                    sdram_read_in <= 1'b1;
-                end else if (cpu_read_in || cpu_write_in) begin
-                    grant <= GRANT_CPU;
-                    sdram_addr_in <= cpu_addr_in;
-                    sdram_data_in <= cpu_data_in;
-                    sdram_read_in <= cpu_read_in;
-                    sdram_write_in <= cpu_write_in;
+            case (state)
+                ST_IDLE: begin
+                    // Video port has priority.
+                    if (vid_read_in) begin
+                        // Hit in cached pair (same word address, pick byte by A0).
+                        if (pair_valid && (pair_word_addr == vid_addr_in[ADDR_WIDTH-1:1])) begin
+                            vid_data_out <= vid_addr_in[0] ? pair_byte_hi : pair_byte_lo;
+                            vid_ready <= 1'b1;
+                        end else begin
+                            // Miss: read requested byte now, then prefetch sibling byte.
+                            vid_addr_pending <= vid_addr_in;
+                            sdram_addr_in <= vid_addr_in;
+                            sdram_read_in <= 1'b1;
+                            state <= ST_VID_WAIT;
+                        end
+                    end else if (cpu_read_in || cpu_write_in) begin
+                        if (cpu_write_in) begin
+                            // Keep coherency simple: invalidate cached pair on any CPU write.
+                            pair_valid <= 1'b0;
+                        end
+                        sdram_addr_in <= cpu_addr_in;
+                        sdram_data_in <= cpu_data_in;
+                        sdram_read_in <= cpu_read_in;
+                        sdram_write_in <= cpu_write_in;
+                        state <= ST_CPU_WAIT;
+                    end
                 end
-            end else if (sdram_ready) begin
-                if (grant == GRANT_CPU) begin
-                    cpu_data_out <= sdram_data_out;
-                    cpu_ready <= 1'b1;
-                end else if (grant == GRANT_VID) begin
-                    vid_data_out <= sdram_data_out;
-                    vid_ready <= 1'b1;
+
+                ST_CPU_WAIT: begin
+                    if (sdram_ready) begin
+                        cpu_data_out <= sdram_data_out;
+                        cpu_ready <= 1'b1;
+                        state <= ST_IDLE;
+                    end
                 end
-                grant <= GRANT_NONE;
+
+                ST_VID_WAIT: begin
+                    if (sdram_ready) begin
+                        // Return requested byte.
+                        vid_data_out <= sdram_data_out;
+                        vid_ready <= 1'b1;
+
+                        // Store first byte to pair cache.
+                        pair_word_addr <= vid_addr_pending[ADDR_WIDTH-1:1];
+                        if (vid_addr_pending[0]) begin
+                            pair_byte_hi <= sdram_data_out;
+                        end else begin
+                            pair_byte_lo <= sdram_data_out;
+                        end
+
+                        // Prefetch sibling byte immediately.
+                        sdram_addr_in <= {vid_addr_pending[ADDR_WIDTH-1:1], ~vid_addr_pending[0]};
+                        sdram_read_in <= 1'b1;
+                        state <= ST_PREFETCH_WAIT;
+                    end
+                end
+
+                ST_PREFETCH_WAIT: begin
+                    if (sdram_ready) begin
+                        // Fill second byte and mark cache valid.
+                        if (vid_addr_pending[0]) begin
+                            pair_byte_lo <= sdram_data_out;
+                        end else begin
+                            pair_byte_hi <= sdram_data_out;
+                        end
+                        pair_valid <= 1'b1;
+                        state <= ST_IDLE;
+                    end
+                end
+
+                default: begin
+                    state <= ST_IDLE;
+                end
             end
         end
     end
