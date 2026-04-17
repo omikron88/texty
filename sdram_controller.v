@@ -71,6 +71,9 @@ module sdram_controller (
 
     reg [15:0] dq_out;
     reg dq_oe;
+    reg [ADDR_WIDTH-2:0] cache_word_addr;
+    reg [15:0] cache_data;
+    reg cache_valid;
 
     wire [ADDR_WIDTH-2:0] word_addr = addr_latched[ADDR_WIDTH-1:1];
     wire byte_sel = addr_latched[0];
@@ -94,6 +97,9 @@ module sdram_controller (
             op_write <= 1'b0;
             dq_out <= 16'h0000;
             dq_oe <= 1'b0;
+            cache_word_addr <= {(ADDR_WIDTH-1){1'b0}};
+            cache_data <= 16'h0000;
+            cache_valid <= 1'b0;
 
             sdram_addr <= 13'h0000;
             sdram_ba <= 2'b00;
@@ -187,10 +193,17 @@ module sdram_controller (
                 ST_IDLE: begin
                     if (refresh_cnt >= REFRESH_INTERVAL) begin
                         state <= ST_REFRESH;
+                    end else if (read_in && cache_valid && (cache_word_addr == addr_in[ADDR_WIDTH-1:1])) begin
+                        data_out <= addr_in[0] ? cache_data[15:8] : cache_data[7:0];
+                        ready <= 1'b1;
                     end else if (read_in || write_in) begin
                         addr_latched <= addr_in;
                         op_read <= read_in;
                         op_write <= write_in;
+                        if (write_in) begin
+                            // Avoid stale data after partial writes.
+                            cache_valid <= 1'b0;
+                        end
                         sdram_ba <= bank;
                         sdram_addr <= {1'b0, row};
                         sdram_ras_n <= 1'b0; // ACTIVATE
@@ -217,13 +230,16 @@ module sdram_controller (
                     sdram_ras_n <= 1'b1;
                     sdram_cas_n <= 1'b0;
                     sdram_we_n <= 1'b1;
-                    sdram_dqm <= byte_sel ? 2'b01 : 2'b10; // mask opposite byte
+                    sdram_dqm <= 2'b00; // read full 16-bit word into cache
                     wait_cnt <= CAS_LATENCY;
                     state <= ST_CAS_WAIT;
                 end
 
                 ST_CAS_WAIT: begin
                     if (wait_cnt == 0) begin
+                        cache_data <= sdram_dq;
+                        cache_word_addr <= word_addr;
+                        cache_valid <= 1'b1;
                         data_out <= byte_sel ? sdram_dq[15:8] : sdram_dq[7:0];
                         ready <= 1'b1;
                         state <= ST_IDLE;
