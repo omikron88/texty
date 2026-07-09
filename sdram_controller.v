@@ -1,7 +1,12 @@
-// SDRAM controller for IS42S16320D-7
+// SDRAM controller for Samsung K4S561632E-compatible x16 SDRAM.
 // User interface: 8-bit SRAM-like access with ready handshake.
 
-module sdram_controller (
+module sdram_controller #(
+    parameter integer ROW_BITS   = 13,
+    parameter integer COL_BITS   = 9,
+    parameter integer BANK_BITS  = 2,
+    parameter integer ADDR_WIDTH = ROW_BITS + COL_BITS + BANK_BITS + 1
+) (
     input  wire        clk,
     input  wire        reset_n,
 
@@ -24,11 +29,8 @@ module sdram_controller (
     output reg         sdram_cke
 );
 
-    // Geometry for IS42S16320D: 4 banks, 4096 rows, 256 columns (x16)
-    localparam integer ROW_BITS  = 12;
-    localparam integer COL_BITS  = 8;
-    localparam integer BANK_BITS = 2;
-    localparam integer ADDR_WIDTH = ROW_BITS + COL_BITS + BANK_BITS + 1; // +1 for byte select
+    // Default geometry for K4S561632E: 4 banks, 8192 rows, 512 columns (x16).
+    // ADDR_WIDTH includes one byte-select bit below the 16-bit word address.
 
     // Timing parameters in cycles @133MHz (7.5ns)
     localparam integer tRCD_CYCLES = 3;   // ACT to RD/WR
@@ -38,7 +40,7 @@ module sdram_controller (
     localparam integer tWR_CYCLES  = 2;   // Write recovery
     localparam integer CAS_LATENCY = 2;   // CL=2
 
-    // Refresh: 7.8us interval -> 1040 cycles at 133MHz
+    // Refresh: 64ms / 8192 rows = 7.8125us -> about 1039 cycles at 133MHz.
     localparam integer REFRESH_INTERVAL = 1040;
 
     // Initialization delay: 200us -> 26600 cycles at 133MHz
@@ -141,7 +143,7 @@ module sdram_controller (
 
                 ST_PRECHARGE: begin
                     // Precharge all banks
-                    sdram_addr <= 13'b0010_0000_0000; // A10=1
+                    sdram_addr <= 13'h0400; // A10=1
                     sdram_ras_n <= 1'b0;
                     sdram_we_n <= 1'b0;
                     wait_cnt <= tRP_CYCLES;
@@ -213,7 +215,7 @@ module sdram_controller (
 
                 ST_READ: begin
                     sdram_ba <= bank;
-                    sdram_addr <= {3'b001, col}; // A10=1 for auto-precharge
+                    sdram_addr <= {2'b00, 1'b1, 1'b0, col}; // A10=1 for auto-precharge
                     sdram_ras_n <= 1'b1;
                     sdram_cas_n <= 1'b0;
                     sdram_we_n <= 1'b1;
@@ -234,7 +236,7 @@ module sdram_controller (
 
                 ST_WRITE: begin
                     sdram_ba <= bank;
-                    sdram_addr <= {3'b001, col}; // A10=1 for auto-precharge
+                    sdram_addr <= {2'b00, 1'b1, 1'b0, col}; // A10=1 for auto-precharge
                     sdram_ras_n <= 1'b1;
                     sdram_cas_n <= 1'b0;
                     sdram_we_n <= 1'b0;
