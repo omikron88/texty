@@ -5,6 +5,7 @@ project(texty_emulator LANGUAGES CXX)
 option(TEXTY_BUILD_TESTS "Build deterministic core tests" ON)
 
 add_library(texty_core
+    src/core/floppy.cpp
     src/core/interrupt3214.cpp
     src/core/memory_map.cpp
     src/core/video.cpp

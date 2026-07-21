@@ -15,7 +15,11 @@ konfiguračními parametry, nikdy se nedoplňují obvyklým chováním PC.
 | video RAM | 16 KiB, adresace sloupec-bajt × řádek |
 | paměť | ROM/VRAM mapa nebo úplná 64KiB RAM mapa |
 | periférie | 3 × 8255, 8253, 8251, prioritní řadič 3214 |
-| mechaniky | dvě 8palcové FM, 77 stop, 26 × 128 B, 360 RPM |
+| mechaniky | dvě 8palcové jednostranné IBM 3740, single density FM, 77 stop, 26 × 128 B, 360 RPM |
+
+Výměnný raw obraz má přesně **256 256 B** (`1 × 77 × 26 × 128`). Při vložení
+se rozvine do 77 interních FM stop po 5 208 bajtech; Z80 nikdy nečte sektor
+přímo z raw obrazu.
 
 `Tick` je `uint64_t` a znamená jednu dvanáctimiliontinu sekundy. Všechny
 události včetně CPU, PAL, 1MHz vstupu PIT, diskového bajtu a Indexu jsou
@@ -159,10 +163,17 @@ mechaniky ji neresetuje. Index je aktivní po konfigurovatelnou
 `index_pulse_width_ticks`, protože šířka není potvrzena. Stav Track 00 platí
 i bez média, Write Protect je aktivní pro read-only obraz.
 
-Stopa je `std::vector<FMByte>`, kde `FMByte` obsahuje `data` a `clocks`.
-Jedna položka trvá 384 ticků. Tato reprezentace zachová mezery, fázovou polohu
-a speciální FM masky a umožní formátovat část stopy; sektorový obraz se pouze
-importuje/exportuje přes rozvinutou stopu.
+Stopa je 5 208 `FMByte`, kde položka obsahuje `data` a `clocks`; mezi
+datovými bajty je 384 ticků. Formát importeru IBM 3740 je přesně: 40×`ff`,
+6×`00`, Index Mark (`d7/fc`), 26×`ff`, pro každý z 26 sektorů 6×`00`, Address
+Mark (`c7/fe`), CHRN (`track`, `0`, `1..26`, `0`), CRC, 11×`ff`, 6×`00`, Data
+Mark (`c7/fb`), 128 datových bajtů, CRC a 27×`ff`; stopu uzavírá 247×`ff`.
+Ostatní bajty mají hodinovou masku `ff`. Posledních 128 ticků do Indexu není
+datový bajt, takže rotační perioda zůstane přesně 2 000 000 ticků.
+
+CRC je CRC-16/CCITT (`poly=0x1021`, `init=0xffff`), MSB-first. Počítá se od
+Address/Data Mark včetně až po poslední datový bajt a zapisuje se high byte,
+potom low byte.
 
 Pomocný registr z `OUT 0x50` interpretuje jen D0 RE, D1 WRE, D2 RDM a D4 FOR.
 Jeho reset nastane při resetu, OUT2, deaktivaci PA6 nebo druhém Indexu při FOR.
@@ -180,7 +191,7 @@ ROM/VRAM mapu, všechny PPI do vstupu, diskový registr na nulu, diskové
 časování vypnuté pull-upem PA6 a bezpečnou masku 3214 `0`.
 
 Následující položky jsou parametry/TODO, nikoli vymyšlené konstanty: směr DIR,
-šířka a hrana Indexu, FM gapy a značky, CRC algoritmus, inicializace PIT,
+šířka a hrana Indexu, inicializace PIT,
 modemové piny 8251, mechanické prodlevy a souběh RE/WRE. Každá hodnota musí
 být dohledatelná ve schématu nebo v testovaném softwaru předtím, než se stane
 výchozím chováním.
