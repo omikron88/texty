@@ -1,6 +1,6 @@
 #include "core/memory_map.hpp"
 
-namespace texty {
+namespace fk1 {
 
 void MemoryMap::reset() { map_ = CpuMap::RomVideo; }
 
@@ -30,4 +30,4 @@ void MemoryMap::select_ram_map() { map_ = CpuMap::Ram; }
 void MemoryMap::select_rom_video_map() { map_ = CpuMap::RomVideo; }
 MemoryMap::CpuMap MemoryMap::map() const { return map_; }
 
-} // namespace texty
+} // namespace fk1

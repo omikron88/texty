@@ -5,7 +5,7 @@
 #include <array>
 #include <cstdint>
 
-namespace texty {
+namespace fk1 {
 
 class Video {
 public:
@@ -23,4 +23,4 @@ private:
     std::uint8_t scroll_latched_{};
 };
 
-} // namespace texty
+} // namespace fk1

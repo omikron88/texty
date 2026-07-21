@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <exception>
 
-namespace texty {
+namespace fk1 {
 namespace {
 
 constexpr std::size_t kPreIndexGapBytes = 40;
@@ -132,4 +132,4 @@ void FloppyDrive::build_tracks() {
     }
 }
 
-} // namespace texty
+} // namespace fk1

@@ -1,6 +1,6 @@
 #include "core/interrupt3214.hpp"
 
-namespace texty {
+namespace fk1 {
 
 void Interrupt3214::reset() {
     inputs_.fill(false);
@@ -36,4 +36,4 @@ std::uint8_t Interrupt3214::acknowledge_im2() {
     return input < 0 ? 0xff : static_cast<std::uint8_t>((7 - input) << 1);
 }
 
-} // namespace texty
+} // namespace fk1

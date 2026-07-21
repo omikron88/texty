@@ -7,7 +7,7 @@
 #include <span>
 #include <vector>
 
-namespace texty {
+namespace fk1 {
 
 inline constexpr std::size_t kFloppyHeads = 1;
 inline constexpr std::size_t kFloppyTracks = 77;
@@ -67,4 +67,4 @@ private:
     bool write_protected_{};
 };
 
-} // namespace texty
+} // namespace fk1

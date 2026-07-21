@@ -3,7 +3,7 @@
 #include <array>
 #include <cstdint>
 
-namespace texty {
+namespace fk1 {
 
 class MemoryMap {
 public:
@@ -25,4 +25,4 @@ private:
     CpuMap map_{CpuMap::RomVideo};
 };
 
-} // namespace texty
+} // namespace fk1

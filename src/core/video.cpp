@@ -1,6 +1,6 @@
 #include "core/video.hpp"
 
-namespace texty {
+namespace fk1 {
 
 void Video::set_scroll_ppi(const std::uint8_t value) { scroll_ppi_ = value; }
 void Video::ras_edge() { scroll_latched_ = scroll_ppi_; }
@@ -19,4 +19,4 @@ Video::Framebuffer Video::render(const MemoryMap& memory) const {
     return frame;
 }
 
-} // namespace texty
+} // namespace fk1

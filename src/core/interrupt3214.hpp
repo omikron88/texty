@@ -3,7 +3,7 @@
 #include <array>
 #include <cstdint>
 
-namespace texty {
+namespace fk1 {
 
 class Interrupt3214 {
 public:
@@ -20,4 +20,4 @@ private:
     std::uint8_t mask_{};
 };
 
-} // namespace texty
+} // namespace fk1

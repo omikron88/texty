@@ -1,7 +1,7 @@
-# Implementační návrh emulátoru Texty
+# Implementační návrh emulátoru FK1
 
 Tento návrh je implementačním doplňkem k autoritativní technické specifikaci
-stroje. Je jí podřízen: zejména nepopisuje PC kompatibilní stroj a nenahrazuje
+stroje FK1. Je jí podřízen: zejména nepopisuje PC kompatibilní stroj a nenahrazuje
 složený FM diskový řadič jedním FDC. Neurčené hodnoty zůstávají pojmenovanými
 konfiguračními parametry, nikdy se nedoplňují obvyklým chováním PC.
 
@@ -141,7 +141,7 @@ všechny jeho prvky jsou hostitelské ovladače a nesmějí přímo měnit emulo
 ├ [Disk A…] [Disk B…] │ [Reset] [⏸/▶] │ A ●  B ● ───────────────────────────┤
 ├───────────────────────────────────────────────────────────────────────────┤
 │                                                                           │
-│                         4:3 výstup Texty                                 │
+│                          4:3 výstup FK1                                  │
 │                   (např. 1024 × 768, nearest neighbour)                  │
 │                                                                           │
 └───────────────────────────────────────────────────────────────────────────┘

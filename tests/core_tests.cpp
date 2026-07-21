@@ -8,7 +8,7 @@
 #include <cstdint>
 #include <vector>
 
-using namespace texty;
+using namespace fk1;
 
 int main() {
     MemoryMap memory;
