@@ -128,6 +128,73 @@ Frontend vytvoří SDL3 streaming texture v ARGB8888 a zobrazuje ji nearest
 neighbour v poměru 4:3 (např. 1024 × 768). Nesmí vytvářet video přerušení ani
 časovat řádky podle renderování.
 
+## Uživatelské rozhraní SDL3
+
+První verze frontendu má zůstat malá: nad obrazovkou je lišta menu, pod ní
+kompaktní nástrojová lišta a zbytek klientské plochy tvoří jediný obrazový
+obdélník se zachovaným poměrem 4:3. Nejde o panel emulovaného hardware;
+všechny jeho prvky jsou hostitelské ovladače a nesmějí přímo měnit emulovaný
+čas.
+
+```text
+┌ Menu: Soubor | Emulace | Nápověda ────────────────────────────────────────┐
+├ [Disk A…] [Disk B…] │ [Reset] [⏸/▶] │ A ●  B ● ───────────────────────────┤
+├───────────────────────────────────────────────────────────────────────────┤
+│                                                                           │
+│                         4:3 výstup Texty                                 │
+│                   (např. 1024 × 768, nearest neighbour)                  │
+│                                                                           │
+└───────────────────────────────────────────────────────────────────────────┘
+```
+
+### Menu a nástrojová lišta
+
+Menu **Soubor** obsahuje položky „Otevřít image mechaniky A…“, „Otevřít image
+mechaniky B…“ a „Konec“. Shodné dvě akce v nástrojové liště otevírají pouze
+hostitelský dialog pro soubor a po výběru předají obraz `FloppyDrive`; dialog
+ani načítání souboru neběží v emulačním vlákně. Neplatná délka souboru nebo
+chyba otevření se oznámí modálním dialogem, přičemž vložené médium zůstane
+beze změny.
+
+Tlačítko **Reset** požádá frontend o reset na bezpečné hranici emulované
+události. Resetuje stroj podle hardwarové specifikace, ale nevysune hostitelské
+obrazy disket: mechaniky dál rotují, pokud médium zůstalo vložené. Tlačítko
+**⏸** přepíná pauzu a při pozastavení se změní na **▶**. Pauza zastaví volání
+`Machine::run_until`, nikoli zobrazení posledního framebufferu, zpracování
+menu, dialogů nebo překreslení okna. Po obnovení se nepřidávají žádné ticky
+odpovídající době, po kterou byl emulátor pozastavený.
+
+### Kontrolky mechanik
+
+Nástrojová lišta obsahuje dvě malé kulaté kontrolky s přístupnými popisky
+„Mechanika A: aktivní/neaktivní“ a „Mechanika B: aktivní/neaktivní“. Jejich
+účel je ukázat přesně požadovaný stav adresované datové části řadiče, ne
+odhadovat aktivitu podle přístupu k souboru obrazu nebo podle Indexu.
+
+```cpp
+const bool disk_subsystem_active = machine.disk_timing_enabled(); // PA6 == 0
+const Drive selected = machine.disk_selected_drive();             // PPI 0x20 PC5
+
+const bool drive_a_led = disk_subsystem_active && selected == Drive::A;
+const bool drive_b_led = disk_subsystem_active && selected == Drive::B;
+```
+
+`disk_timing_enabled()` je aktivně nízký signál PA6 z řídicí PPI `0x60`; při
+resetu jej pull-up drží neaktivní. `disk_selected_drive()` čte výstupní latch
+PC5 datové PPI `0x20` (0 = A, 1 = B, s resetovým pull-upem B). Kontrolka proto
+může svítit i bez vloženého média, což věrně ukazuje kombinaci skutečných
+řídicích signálů. Stav write-protect ani Index ji nemění. Frontend čte oba
+stavy po dokončení dávky emulovaných událostí a pouze je vykreslí; nikdy jimi
+neřídí mechaniku ani diskový řadič.
+
+### Velikost a vykreslování
+
+Oblast obrazu má minimální logickou velikost 512 × 384 a při změně velikosti
+okna se centruje do největšího celočíselně škálovaného obdélníku 4:3. Textura
+zůstává 512 × 256; vertikální škálování do 4:3 záměrně zachovává nečtvercové
+pixely původního stroje. Při malém okně lze použít menší 4:3 obdélník, ale
+neorezává se obraz a nepoužívá se lineární filtrování.
+
 ## Periférie a vstup
 
 Obecný `Ppi8255` implementuje mode-set, BSR, portové latche a mode 0/1.
