@@ -8,6 +8,7 @@ add_library(fk1_core
     src/core/floppy.cpp
     src/core/interrupt3214.cpp
     src/core/memory_map.cpp
+    src/core/ppi8255.cpp
     src/core/video.cpp
 )
 target_include_directories(fk1_core PUBLIC src)

@@ -1,6 +1,7 @@
 #include "core/floppy.hpp"
 #include "core/interrupt3214.hpp"
 #include "core/memory_map.hpp"
+#include "core/ppi8255.hpp"
 #include "core/video.hpp"
 
 #include <array>
@@ -44,6 +45,33 @@ int main() {
     assert(interrupts.acknowledge_im2() == 0x00);
     interrupts.set_mask(0);
     assert(!interrupts.requested());
+
+    Ppi8255 disk_ppi;
+    disk_ppi.reset();
+    disk_ppi.write(3, 0xa6); // PA mode-1 output, PB mode-1 input.
+    disk_ppi.write(3, 0x0d); // BSR: enable INTE_A through PC6.
+    disk_ppi.write(3, 0x05); // BSR: enable INTE_B through PC2.
+    disk_ppi.write(0, 0x5a);
+    assert(disk_ppi.port_a_latch() == 0x5a);
+    assert(!disk_ppi.interrupt_a());
+    assert((disk_ppi.read(2) & 0x80) == 0); // /OBF_A asserted.
+    disk_ppi.set_acknowledge_a(false);
+    assert(!disk_ppi.interrupt_a());
+    assert((disk_ppi.read(2) & 0xc0) == 0xc0);
+    disk_ppi.set_acknowledge_a(true);
+    assert(disk_ppi.interrupt_a());
+    assert((disk_ppi.read(2) & 0x88) == 0x88);
+    disk_ppi.write(0, 0x3c);
+    assert(!disk_ppi.interrupt_a());
+    disk_ppi.set_port_b_input(0xa5);
+    disk_ppi.set_strobe_b(false);
+    assert(!disk_ppi.interrupt_b());
+    assert((disk_ppi.read(2) & 0x06) == 0x06);
+    disk_ppi.set_strobe_b(true);
+    assert(disk_ppi.interrupt_b());
+    assert((disk_ppi.read(2) & 0x03) == 0x03);
+    assert(disk_ppi.read(1) == 0xa5);
+    assert(!disk_ppi.interrupt_b());
 
     static_assert(kFloppyImageBytes == 256'256);
     assert(crc16_ccitt(std::array<std::uint8_t, 0>{}) == 0xffff);
