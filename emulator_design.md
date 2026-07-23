@@ -55,29 +55,6 @@ Pořadí stejně časovaných událostí je součástí kontraktu: nejprve dokon
 přenosu/handshake, pak změna čítače a jeho `OUT`, potom vyhodnocení 3214.
 To zaručí například, že poslední diskový bajt vyvolá I7 před I5.
 
-## Implementovaná kostra
-
-`Machine` je nyní jednoznačný vlastník existujících zařízení: `MemoryMap`,
-`Video`, `Interrupt3214`, tří instancí `Ppi8255` a `IoBus`. Jeho veřejné
-metody `memory_read/write` a `io_read/write` jsou jedinou budoucí hranicí pro
-adaptér Z80; `run_until(Tick)` je připravené místo pro jednotný plánovač.
-Současná kostra posune `Tick` deterministicky bez skrytých vedlejších účinků,
-dokud do ní není zapojen CPU a časované periferie.
-
-Knihovna `fk1_core` se sestavuje bez SDL. Volitelný program `fk1_emulator`
-zatím pouze vytvoří `Machine` a ověří životní cyklus kostry; později do něj
-přibude SDL3 frontend a CPU adaptér. Přepínač CMake `FK1_BUILD_APP` umožní
-tento minimální program vypnout při čistě headless testování.
-
-Stav implementace po vrstvách:
-
-- hotové základy: paměť, VRAM renderer, 3214, datová PPI mode 1, FM importer
-  a úzký I/O dekodér;
-- připravené rozhraní: `Machine`, tři PPI a přesměrování jejich skupin
-  `0x00`, `0x20`, `0x60`;
-- následuje: adaptér Z80, 8253, 8251, video timing/I4, myš, 8255 tiskárny a
-  klávesnice, disková logika a SDL3 frontend.
-
 ## Rozhraní a plánovač
 
 ```cpp
@@ -107,22 +84,6 @@ mikrokrokem CPU; přerušení CPU přijme pouze při svém potvrzovacím cyklu.
 Prioritní řadič při tomto cyklu zachytí nejvyšší povolený aktivní vstup a vrátí
 IM2 vektor `0x00, 0x02, …, 0x0e` pro I7 až I0. Potvrzení nesmí rušit I3/I4
 latche; jejich explicitní zrušení probíhá pouze přes skupinu portů `0x70`.
-
-### Připojení CPU redcode/Z80
-
-Knihovnu redcode/Z80 lze propojit s FK1 bez přímé závislosti PPI na CPU.
-Adaptér CPU předá každé čtení portu do `IoBus::read(std::uint16_t)` a každý
-zápis do `IoBus::write(std::uint16_t, std::uint8_t)`. `IoBus` následně provede
-dekódování FK1 a pro skupinu `0x20` zavolá `Ppi8255::read/write(port & 3)`.
-PPI proto nezná instrukce Z80, callbacky konkrétní knihovny ani hostitelský
-čas; je běžným zařízením na sběrnici.
-
-Je podstatné předat **celý 16bitový port** z CPU do `IoBus`. Teprve tam se
-skupina určí jako `port & 0x70` a registr PPI jako `port & 0x03`, takže
-redcode/Z80 zachová FK1 zrcadla se všemi hodnotami A15–A8 a A7. Neobsazená
-skupina vrací `0xff`. Integrační adaptér redcode/Z80 zároveň přepočte jím
-spotřebované T-stavy na ticky (`T-stavy × 3`) a při jeho maskovatelném
-interrupt acknowledge získá IM2 byte z `Interrupt3214`; NMI ani DMA nepřivádí.
 
 ## Paměť a I/O sběrnice
 
@@ -235,86 +196,6 @@ pixely původního stroje. Při malém okně lze použít menší 4:3 obdélník
 neorezává se obraz a nepoužívá se lineární filtrování.
 
 ## Periférie a vstup
-
-### 8255 a diskový handshake
-
-Datová PPI na skupině `0x20` je samostatný `Ppi8255` a inicializuje se
-řídicím slovem `0xa6`: skupina A je mode 1 výstup na PA a skupina B je mode 1
-vstup na PB. CPU aktivuje skryté enable klopné obvody BSR zápisy, nikoli
-změnou řídicího slova: BSR PC6 řídí `INTE_A` a BSR PC2 řídí `INTE_B`.
-
-Zápis CPU do PA uloží bajt, nastaví `/OBF_A` aktivně (PC7 = 0) a zruší
-`INTR_A`. Diskový serializér přivádí skutečné hrany `set_acknowledge_a(false)`
-a následně `set_acknowledge_a(true)`: sestupná hrana `/ACK_A` vrátí `/OBF_A`
-do 1 a zruší `INTR_A`, vzestupná hrana při `INTE_A` nastaví `INTR_A` na
-PC3/I7. Opačně deserializér nejprve vloží byte přes `set_port_b_input(value)`
-a pak přivede `set_strobe_b(false)` a `set_strobe_b(true)`; sestupná hrana
-`/STB_B` zachytí PB a nastaví `IBF_B` (PC1), vzestupná hrana při `INTE_B`
-nastaví `INTR_B` na PC0/I7. Čtení PB CPU zruší `IBF_B` i `INTR_B`.
-
-Pomocné metody `acknowledge_a()` a `strobe_b(value)` provedou obě hrany pro
-jednodušší testy, ale časovaný diskový řadič musí používat rozhraní po
-jednotlivých hranách. Čtení Portu C v mode 1 vrací stavové bity 8255 včetně
-`INTE_A` na PC6 a `INTE_B` na PC2, nikoli okamžitou úroveň vstupních pinů ACK
-a STB.
-
-`Machine` po každé takové změně vyhodnotí náběžnou hranu
-`ppi.interrupt_a() || ppi.interrupt_b()` pro CLK2 8253 a současně vede logický
-součet na I7. PPI tedy sama nesmí počítat bajty ani resetovat pomocný diskový
-registr; tyto účinky patří zapojení FK1 kolem ní. Čtení PC skládá skutečné
-handshake piny (PC7/PC3 a PC1/PC0) s volným PC5, který stále vybírá mechaniku.
-
-### Převzetí hotových modelů 8251, 8253 a 8255
-
-Hotové modely obvodů z
-[GPMD85Emulator](https://github.com/mborik/GPMD85Emulator/tree/master/src)
-lze technicky použít, **ne však přímo jako součást zapojení FK1**. Je nutné je
-uzavřít adaptéry `Ppi8255`, `Pit8253` a `Uart8251`, které mají rozhraní FK1;
-žádný kód mimo adaptér nesmí záviset na hlavičkách, globálním stavu nebo
-časovačích cizího projektu. Tím lze později nahradit zdejší dílčí `Ppi8255`
-plným modelem bez změny diskové logiky.
-
-Před převzetím je povinná revize konkrétního připnutého commitu zdrojového
-stromu: licence a copyright musí být slučitelné s licencí FK1, testy musí
-potvrdit podporu potřebných režimů a zdroj nesmí být převzat z plovoucí větve.
-Dodaná hlavička `ChipPIO8255.h` je výslovně licencována pod **GNU GPL v3 nebo
-novější**. Její zdroj proto smíme přímo kopírovat, upravovat nebo linkovat jen
-pokud bude celý distribuovaný emulátor FK1 vydán za podmínek GPLv3-or-later a
-budou splněny příslušné povinnosti této licence. Není-li to zamýšlená licence
-FK1, tento kód se nepřebírá; vlastní implementace se opírá o datasheet 8255 a
-hardwarovou specifikaci FK1, nikoli o text nebo strukturu tohoto zdroje.
-
-V tomto checkoutu zdroj GPMD85Emulator není k dispozici, takže jeho API ani
-tvrzení o úplnosti režimů nelze zatím považovat za ověřené. Stejně je nutné
-samostatně ověřit licenci každého kandidátního modulu 8251 a 8253. Dokud
-revize neprojde touto kontrolou, zůstává `Ppi8255` implementací FK1.
-
-Dodané `globals.h` obsahuje pro tento modul pouze makra `BYTE`, `WORD`,
-`DWORD` a `QWORD` pro standardní pevně široké celočíselné typy; ta nejsou
-technickou překážkou a při případné adaptaci se jednoduše nahradí
-`std::uint8_t`, `std::uint16_t`, `std::uint32_t` a `std::uint64_t`. Naproti
-tomu `ChipPIO8255` dědí z `sigslot::has_slots<>` a používá `sigslot::signal*`
-pro notifikace. To je skutečná závislost, kterou adaptér FK1 nemá přenášet:
-buď zůstane uvnitř GPL převzatého modulu, nebo se rozhraní implementuje
-samostatně přes explicitní metody pinů FK1.
-
-Adaptér musí převzít jen chování samotného čipu a propojit je s FK1 takto:
-
-- **8255:** CPU používá `read(port & 3)` a `write(port & 3, value)`; okolní
-  disková logika přivádí fyzické hrany `/ACK_A` a `/STB_B` a odebírá piny
-  `/OBF_A`, `IBF_B`, `INTR_A`, `INTR_B` a PC5. Testy musí mimo jiné ověřit
-  mode 1, BSR klopné obvody INTE a odečet PB rušící IBF/INTR.
-- **8253:** čip nesmí volat hostitelský čas ani mít vlastní vlákno. `Machine`
-  jej taktuje hranami CLK0 (V impuls), CLK1 (každých 12 ticků) a CLK2 (náběžná
-  hrana OR diskových INTR); adaptér vrací změny OUT0–OUT2 do zapojení FK1.
-  Je nutná podpora 8253 latch příkazu a LSB/MSB sekvencí, nikoli 8254 Read-Back.
-- **8251:** adaptér dostává obě hrany OUT1 jako RxC/TxC a přivádí/odebírá
-  sériové a modemové piny. `TXRDY || RXRDY` je pouze úrovňový vstup I2, takže
-  nesmí být nahrazen frontou nebo jednorázovou událostí hostitelského UI.
-
-Po úspěšné revizi se převzatý zdroj uloží jako submodul nebo vendored adresář
-na přesném commitu. Přidání přes CMake proběhne až poté; testovací konfigurace
-FK1 musí stále umět sestavit lokální adaptér bez síťového stahování závislostí.
 
 Obecný `Ppi8255` implementuje mode-set, BSR, portové latche a mode 0/1.
 Konkrétní zapojení jej propojí následovně:

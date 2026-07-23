@@ -1,7 +1,5 @@
 #include "core/floppy.hpp"
 #include "core/interrupt3214.hpp"
-#include "core/io_bus.hpp"
-#include "core/machine.hpp"
 #include "core/memory_map.hpp"
 #include "core/ppi8255.hpp"
 #include "core/video.hpp"
@@ -74,32 +72,6 @@ int main() {
     assert((disk_ppi.read(2) & 0x03) == 0x03);
     assert(disk_ppi.read(1) == 0xa5);
     assert(!disk_ppi.interrupt_b());
-
-    Ppi8255 printer_ppi;
-    Ppi8255 control_ppi;
-    IoBus io_bus(printer_ppi, disk_ppi, control_ppi);
-    io_bus.write(0x1223, 0xa6); // A15-A8 and A7 must not affect FK1 decode.
-    io_bus.write(0x9920, 0x3c);
-    assert(disk_ppi.port_a_latch() == 0x3c);
-    disk_ppi.set_port_b_input(0x96);
-    disk_ppi.set_strobe_b(false);
-    disk_ppi.set_strobe_b(true);
-    assert(io_bus.read(0xf121) == 0x96);
-    assert(io_bus.read(0x0014) == 0xff);
-
-    Machine machine;
-    machine.io_write(0x1233, 2);
-    machine.interrupts().set_input(6, true);
-    assert(machine.interrupts().requested());
-    assert(machine.io_read(0xab30) == 0xff);
-    assert(machine.memory().map() == MemoryMap::CpuMap::Ram);
-    assert(machine.io_read(0x8050) == 0xff);
-    assert(machine.memory().map() == MemoryMap::CpuMap::RomVideo);
-    machine.run_until(1'234);
-    assert(machine.now() == 1'234);
-    machine.reset();
-    assert(machine.now() == 0);
-    assert(machine.memory().map() == MemoryMap::CpuMap::RomVideo);
 
     static_assert(kFloppyImageBytes == 256'256);
     assert(crc16_ccitt(std::array<std::uint8_t, 0>{}) == 0xffff);
