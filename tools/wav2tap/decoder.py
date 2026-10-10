@@ -1,5 +1,7 @@
 """Standard ROM tape decoder. No guessed bits or checksum repairs."""
 
+from __future__ import annotations
+
 from dataclasses import asdict, dataclass
 from functools import reduce
 from operator import xor
@@ -31,6 +33,8 @@ class Block:
     speed: float
     data: bytes
     is_header: bool = False
+    data_start: float | None = None
+    threshold_fraction: float = 0.06
 
     def summary(self):
         result = asdict(self)
@@ -50,6 +54,30 @@ class Issue:
     end: float
     channel: int
     message: str
+    threshold_fraction: float | None = None
+
+
+@dataclass
+class SignalAnalysis:
+    filtered: np.ndarray
+    envelope: np.ndarray
+    noise: float
+
+    def threshold(self, fraction):
+        return np.maximum(fraction * self.envelope, 3 * self.noise)
+
+
+@dataclass
+class DetectionTrace:
+    threshold_fraction: float
+    edges: np.ndarray
+
+
+@dataclass
+class ChannelDiagnostics:
+    channel: int
+    analysis: SignalAnalysis
+    traces: list[DetectionTrace]
 
 
 def read_wav(path):
@@ -75,17 +103,16 @@ def read_wav(path):
     return fs, audio
 
 
-def edge_times(audio, fs, threshold_fraction=0.06):
-    """Confirm zero crossings by opposite excursions, keeping crossing timestamps.
+def prepare_signal(audio, fs):
+    """Prepare the same filtered signal for all thresholds and optional plots.
 
     A causal high pass removes slow DC drift without allowing the following
     pause to shift the baseline of weak final data pulses. Hysteresis follows a local
     amplitude envelope and a robust noise floor, so short weak pulses survive.
-    Multiple threshold settings are tried independently by decode_audio().
     """
     audio = np.asarray(audio, dtype=np.float64)
-    if np.max(np.abs(audio)) == 0:
-        return np.empty(0)
+    if not audio.size or np.max(np.abs(audio)) == 0:
+        return SignalAnalysis(np.zeros_like(audio), np.zeros_like(audio), 0.0)
     highpass = butter(2, 40, btype="highpass", fs=fs, output="sos")
     signal, _ = sosfilt(highpass, audio, zi=sosfilt_zi(highpass) * audio[0])
     # Estimate noise before low-pass filtering; subsample for long recordings.
@@ -96,7 +123,13 @@ def edge_times(audio, fs, threshold_fraction=0.06):
     signal = sosfiltfilt(lowpass, signal)
     window = max(3, round(fs * 0.01))
     envelope = uniform_filter1d(maximum_filter1d(np.abs(signal), window), window)
-    threshold = np.maximum(threshold_fraction * envelope, 3 * noise)
+    return SignalAnalysis(signal, envelope, float(noise))
+
+
+def detect_edges(analysis, fs, threshold_fraction=0.06):
+    """Confirm excursions while keeping the interpolated zero-crossing times."""
+    signal = analysis.filtered
+    threshold = analysis.threshold(threshold_fraction)
 
     crossings = np.flatnonzero(np.signbit(signal[:-1]) != np.signbit(signal[1:]))
     if not len(crossings):
@@ -112,6 +145,10 @@ def edge_times(audio, fs, threshold_fraction=0.06):
     transitions = qualified[1:][signs[1:] != signs[:-1]]
     indices = crossings[transitions - 1]
     return (indices - signal[indices] / (signal[indices + 1] - signal[indices])) / fs
+
+
+def edge_times(audio, fs, threshold_fraction=0.06):
+    return detect_edges(prepare_signal(audio, fs), fs, threshold_fraction)
 
 
 def decode_edges(edges, channel=0, *, headerless=False):
@@ -139,6 +176,7 @@ def decode_edges(edges, channel=0, *, headerless=False):
 
         initial_scale = scale
         i += 2
+        data_start = float(edges[i])
         data = bytearray()
         byte, bit_count = 0, 0
         error = None
@@ -190,21 +228,31 @@ def decode_edges(edges, channel=0, *, headerless=False):
             issues.append(Issue(float(edges[begin]), end, channel, error))
         else:
             blocks.append(Block(float(edges[begin]), end, channel, initial_scale, bytes(data),
-                                not headerless and is_standard_header(data)))
+                                not headerless and is_standard_header(data), data_start))
     return blocks, issues
 
 
-def decode_audio(audio, fs, *, headerless=False):
-    """Try channels and thresholds independently; merge by recording position."""
+def decode_audio(audio, fs, *, headerless=False, diagnostics=None):
+    """Decode normally; optionally append the actual detector traces to a list."""
     if audio.ndim == 1:
         audio = audio[:, None]
     candidates, failures = [], []
     for channel in range(audio.shape[1]):
+        analysis = prepare_signal(audio[:, channel], fs)
+        traces = []
         for fraction in (0.06, 0.025, 0.12):
-            blocks, issues = decode_edges(edge_times(audio[:, channel], fs, fraction), channel,
-                                          headerless=headerless)
+            edges = detect_edges(analysis, fs, fraction)
+            blocks, issues = decode_edges(edges, channel, headerless=headerless)
+            for block in blocks:
+                block.threshold_fraction = fraction
+            for issue in issues:
+                issue.threshold_fraction = fraction
             candidates.extend(blocks)
             failures.extend(issues)
+            if diagnostics is not None:
+                traces.append(DetectionTrace(fraction, edges))
+        if diagnostics is not None:
+            diagnostics.append(ChannelDiagnostics(channel, analysis, traces))
 
     groups = []
     for block in sorted(candidates, key=lambda b: (b.start, b.channel)):
