@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from functools import reduce
+import heapq
 from operator import xor
 import struct
 
@@ -18,6 +19,7 @@ SYNC = np.array([667, 735]) / CLOCK
 ZERO = 855 / CLOCK
 ONE = 1710 / CLOCK
 MIN_PILOT = 256
+MIN_EXCURSION = float(SYNC[0] * 0.45)
 
 
 def is_standard_header(data):
@@ -144,7 +146,63 @@ def detect_edges(analysis, fs, threshold_fraction=0.06):
     # Same-polarity excursions separated by noise do not create extra edges.
     transitions = qualified[1:][signs[1:] != signs[:-1]]
     indices = crossings[transitions - 1]
-    return (indices - signal[indices] / (signal[indices + 1] - signal[indices])) / fs
+    edges = (indices - signal[indices] / (signal[indices + 1] - signal[indices])) / fs
+    return remove_short_excursions(edges)
+
+
+def remove_short_excursions(edges, minimum=MIN_EXCURSION):
+    """Cancel pairs of edges around very short glitches, shortest first.
+
+    Removing both boundaries preserves polarity. Adjacent short excursions must
+    not all be discarded: one may be the genuine edge next to a glitch. A heap
+    and linked indices avoid repeatedly copying a long recording's edge array.
+    """
+    widths = np.diff(edges)
+    short = np.flatnonzero(widths < minimum)
+    if not len(short):
+        return edges
+    previous = np.arange(len(edges)) - 1
+    following = np.arange(len(edges)) + 1
+    following[-1] = -1
+    active = np.ones(len(edges), dtype=bool)
+    pending = [(float(widths[index]), int(index), int(index + 1)) for index in short]
+    heapq.heapify(pending)
+    while pending:
+        _, left, right = heapq.heappop(pending)
+        if not active[left] or not active[right] or following[left] != right:
+            continue
+        before, after = int(previous[left]), int(following[right])
+        active[left] = active[right] = False
+        if before >= 0:
+            following[before] = after
+        if after >= 0:
+            previous[after] = before
+        if before >= 0 and after >= 0 and edges[after] - edges[before] < minimum:
+            heapq.heappush(pending, (float(edges[after] - edges[before]), before, after))
+    return edges[active]
+
+
+def matches_sync(pair, scale):
+    """Constrain each sync pulse and the whole pair when transition edges shift."""
+    expected = SYNC * scale
+    return (np.all(np.abs(pair / expected - 1) <= 0.4)
+            and abs(np.sum(pair) / np.sum(expected) - 1) <= 0.20)
+
+
+def is_termination_tail(pulses, index, scale, data, bit_count):
+    """Recognize up to two closing pulses followed by a confirmed long pause.
+
+    Called only for an invalid data pair. Neither a checksum match alone nor a
+    header length may truncate valid subsequent data pulses.
+    """
+    if bit_count or len(data) < 2 or reduce(xor, data, 0):
+        return False
+    first, second = pulses[index:index + 2]
+    gap = ONE * scale * 1.8
+    if first < gap and second > gap:
+        return True
+    return (index + 2 < len(pulses) and pulses[index + 2] > gap
+            and max(first, second) < gap and first + second <= ONE * scale * 3)
 
 
 def edge_times(audio, fs, threshold_fraction=0.06):
@@ -169,7 +227,7 @@ def decode_edges(edges, channel=0, *, headerless=False):
         if i - begin < MIN_PILOT:
             continue
         scale = float(np.median(pulses[begin:i]) / PILOT)
-        if i + 1 >= len(pulses) or np.any(np.abs(pulses[i:i + 2] / (SYNC * scale) - 1) > 0.25):
+        if i + 1 >= len(pulses) or not matches_sync(pulses[i:i + 2], scale):
             issues.append(Issue(float(edges[begin]), float(edges[i]), channel,
                                 "Pilot bez platné synchronizace."))
             continue
@@ -185,12 +243,6 @@ def decode_edges(edges, channel=0, *, headerless=False):
             mean = (first + second) * 0.5
             if first > ONE * scale * 1.8:
                 break
-            # Some recordings finish with one short level-setting pulse before
-            # the pause. Accept it only after whole bytes with a valid checksum;
-            # an invalid pair inside data must still fail.
-            if (second > ONE * scale * 1.8 and bit_count == 0 and len(data) >= 2
-                    and reduce(xor, data, 0) == 0):
-                break
             # Frequency response and unequal amplitudes shift individual edges.
             # The full bit period cancels displacement of its middle edge.
             distance_zero = abs(mean / (ZERO * scale) - 1)
@@ -199,7 +251,9 @@ def decode_edges(edges, channel=0, *, headerless=False):
             expected = (ONE if bit else ZERO) * scale
             if (min(distance_zero, distance_one) > 0.22
                     or max(abs(first / expected - 1), abs(second / expected - 1)) > 0.4
-                    or abs(first - second) / mean > 0.6):
+                    or abs(first - second) / mean > 0.65):
+                if is_termination_tail(pulses, i, scale, data, bit_count):
+                    break
                 error = "Neplatná dvojice datových pulzů."
                 break
             # Smooth speed updates and limit them to plausible transport drift.
