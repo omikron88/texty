@@ -87,6 +87,58 @@ nestandardní záznam nelze odlišit od jiného zvuku; úspěšný převod proto
 zárukou nalezení veškerého obsahu kazety. XOR také není silná kontrola integrity.
 První verze načítá WAV do paměti, takže dlouhé nahrávky mají vyšší paměťové nároky.
 
+## Diagnostické grafy
+
+Pro export grafů do PNG, SVG nebo PDF nainstalujte volitelný Matplotlib:
+
+```bash
+python3 -m pip install -r tools/wav2tap/requirements-plot.txt
+python3 -m tools.wav2tap kazeta.wav program.tap --plot diagnostika.png --report program.json
+```
+
+Používáte-li výše vytvořené virtuální prostředí, nahraďte `python3` cestou
+`/workspace/.wav2tap-venv/bin/python`. Běžný převod bez `--plot` Matplotlib nevyžaduje.
+Export funguje také na serveru bez grafického prostředí.
+
+Každý kanál má čtyři grafy:
+
+1. Přehled původního WAV s ověřenými bloky, chybovými úseky a zvoleným detailem.
+2. Detail původního a filtrovaného signálu, obou prahů hystereze a potvrzených hran.
+3. Délky jednotlivých pulzů v detailu s referencemi pro synchronizaci, bity a pilot.
+4. Histogram délek pulzů v celém kanálu; dlouhé pauzy mimo rozsah se uvádějí počtem.
+
+Zelená označuje bloky přijaté do výsledku z daného kanálu. Červená označuje
+nevyřešené chybové úseky; přerušovaná čára je konec úseku, kde se chyba zjistila.
+Při chybě XOR je to konec bloku, nikoli automaticky místo poškozeného bitu.
+Ověřený blok získaný z druhého kanálu se do zelených úseků prvního kanálu nepřidává.
+
+Výchozí detail trvá 20 ms a zamíří na první chybu, jinak na začátek dat prvního
+ověřeného bloku. Vlastní přiblížení určíte časem v sekundách od začátku WAV:
+
+```bash
+python3 -m tools.wav2tap kazeta.wav --diagnostics-only --plot detail.svg --plot-start 12.4 --plot-duration 0.03
+```
+
+Režim `--diagnostics-only` nevyžaduje cestu TAP a ukládá pouze požadovaný graf
+nebo JSON protokol. Výstup TAP se v tomto režimu nevytváří. Lze ho využít
+i k analýze nahrávky, kterou se nepodařilo dekódovat; návratový kód zůstává 1
+při chybách nebo při absenci ověřeného bloku. Graf i JSON se uloží také při
+neúspěšném běžném převodu. Existující graf se nepřepisuje.
+
+Graf používá uložené stopy z aktuálního dekódování. V detailu ověřeného bloku
+se zobrazí právě použité nastavení hystereze, uvedené také v jeho JSON položce
+`threshold_fraction`. Pokud detail obsahuje chybové místo, má přednost nastavení
+tohoto chybového pokusu. Jinde se použije základní práh `0.06`.
+Referenční délky se kalibrují podle pilotu ověřeného bloku ve středu detailu;
+bez něj jsou nominální pro 3,5 MHz. Histogram pokrývá celý kanál se stejným
+nastavením detektoru jako detail, takže může zahrnovat bloky s jinými rychlostmi.
+
+Přehled používá minima a maxima vzorků v časových oknech, aby nezmizely krátké
+výpadky. Stejně se zjednodušují dlouhé detaily; u více než 1500 hran se vykreslí
+jejich podmnožina a v titulku je zobrazený/celkový počet. Pro jednotlivé pulzy
+použijte krátké přiblížení. Diagnostika uchovává filtrované signály a tři sady
+hran každého kanálu, proto má vyšší paměťové nároky než samotný převod.
+
 ## Ověření
 
 ```bash
@@ -101,3 +153,7 @@ a příznaky bezhlavičkových bloků, smíšené nahrávky, krátký zakončova
 rozlišení dat podobných hlavičce a zachování všech bajtů za platným XOR prefixem.
 Ověření na skutečné historické
 kazetě je potřeba provést s konkrétní nahrávkou.
+
+Testy grafů vyžadují `requirements-plot.txt`; bez Matplotlib se přeskočí.
+Kontrolují skutečné vzorky, prahy a hrany ve vykresleném detailu, mono/stereo,
+ticho, export všech tří formátů, ochranu souborů a diagnostiku neúspěšného převodu.
