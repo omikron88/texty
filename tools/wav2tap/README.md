@@ -32,6 +32,16 @@ Převodník odstraní pomalý drift středu horní propustí 40 Hz, omezí vysok
 vzorky. Hystereze sleduje místní amplitudu a odhad šumu; zkouší tři nastavení.
 Bit klasifikuje podle délky celé dvojice pulzů, s kontrolou jednotlivých pulzů.
 Kauzální korekce středu brání tomu, aby následující pauza ovlivnila slabé koncové pulzy.
+Krátké zákmity pod přibližně 86 µs se odstraňují jako dvojice hran, od nejkratšího
+zákmitu. Zachovává se tím polarita a skutečná hrana vedle zákmitu. Tento filtr
+je určen pro podporované standardní časování; velmi krátké pulzy turbo loaderů
+vyžadují jiné zpracování.
+
+Na přechodu ze silného pilotu do slabé synchronizace mohou být jednotlivé hrany
+posunuté. Synchronizace proto kontroluje obě délky i jejich součet: nejvýše 40 %
+odchylky jednotlivého pulzu a 20 % odchylky celé dvojice od délky kalibrované pilotem.
+Dvojice datových nul se tak nepovažuje za synchronizaci. Platnost výsledných
+bajtů se nadále ověřuje XOR.
 
 Do TAP se ukládají původní bajty včetně příznaku a XOR kontrolního součtu,
 s dvoubajtovou little-endian délkou každého bloku. Kontrolní součty se neopravují
@@ -47,7 +57,9 @@ Běžné bloky bez hlavičky se rozpoznávají automaticky. Mohou mít libovoln�
 příznakový bajt, včetně `0` a `255`, a nemusí jim předcházet hlavička souboru.
 Do TAP se ukládají beze změny; název, adresy ani umělá hlavička se nedoplňují.
 Stále se vyžaduje standardní pilot a synchronizace, celé bajty a platný XOR.
-Rozpoznává se také jeden zakončovací pulz před pauzou po dokončeném bloku.
+Rozpoznává se také jeden nebo dva omezené zakončovací pulzy před potvrzenou
+pauzou po dokončeném bloku s platným XOR. Zakončení se posuzuje pouze při
+neplatné datové dvojici; platná navazující data se podle shody XOR neuseknou.
 
 Za hlavičku se automaticky považuje pouze ověřený blok dlouhý 19 bajtů
 s příznakem `0` a typem souboru `0` až `3`. Pokud se bezhlavičková data
@@ -157,3 +169,9 @@ kazetě je potřeba provést s konkrétní nahrávkou.
 Testy grafů vyžadují `requirements-plot.txt`; bez Matplotlib se přeskočí.
 Kontrolují skutečné vzorky, prahy a hrany ve vykresleném detailu, mono/stereo,
 ticho, export všech tří formátů, ochranu souborů a diagnostiku neúspěšného převodu.
+
+Regresní vzorek [leonardo_header.wav](../../tests/wav2tap/fixtures/leonardo_header.wav)
+obsahuje skutečnou slabou synchronizaci a zákmit v pilotu. Test vyžaduje přesné
+bajty hlavičky v obou polaritách. Protože jde o výřez samotné hlavičky, hlášení
+o chybějícím navazujícím datovém bloku je očekávané. Podrobnosti jsou v
+[popisu vzorku](../../tests/wav2tap/fixtures/README.md).
