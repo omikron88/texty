@@ -43,6 +43,20 @@ odchylky jednotlivého pulzu a 20 % odchylky celé dvojice od délky kalibrovan�
 Dvojice datových nul se tak nepovažuje za synchronizaci. Platnost výsledných
 bajtů se nadále ověřuje XOR.
 
+Pokud některý blok nezvládne detektor průchodů nulou, automaticky se vyzkouší
+záložní detektor střídajících se maxim a minim. Umí najít i kmit, jehož minimum
+zůstává nad nulou, nebo maximum pod nulou. Používá dvě dolní propusti,
+3500 a 5000 Hz, a lokální požadavek na prominenci extrémů s podlahou podle šumu.
+Nový blok přijme pouze při shodě všech bajtů mezi oběma filtry, platném XOR
+a stejné časové poloze. Ověřené výsledky průchodů nulou mají přednost.
+
+Extrémy označují středy pulzů. Bit se proto rozlišuje podle intervalu uvnitř
+dvojice; interval přes hranici bitů se kontroluje také vůči předchozí délce.
+Povolena je až 35% odchylka vnitřního intervalu. Synchronizace zahrnuje geometrii
+středů na přechodu z pilotu. Tento režim nedoplňuje chybějící pulzy ani neopravuje
+bajty. Shoda filtrů a XOR zvyšují důvěryhodnost, nejsou silnou kontrolou integrity.
+Skutečný výpadek signálu může nadále znemožnit načtení celého bloku.
+
 Do TAP se ukládají původní bajty včetně příznaku a XOR kontrolního součtu,
 s dvoubajtovou little-endian délkou každého bloku. Kontrolní součty se neopravují
 a neznámé bity se nehádají. Délka bloku se určuje z pulzů až ke konci záznamu
@@ -81,6 +95,9 @@ Při rozpoznaném poškozeném bloku se standardně TAP nevytvoří a návratov�
 Protokol JSON se přesto uloží, byl-li požadován. Obsahuje pozice bloků,
 délky, názvy z hlaviček, kanál a rychlostní faktor: hodnota nad 1 znamená
 delší pulzy než nominální. Čísla kanálů v JSON jsou od nuly; textový výpis od jedné.
+Položka `detector` uvádí `zero_crossing` nebo `extrema`; `lowpass_hz` identifikuje
+filtr záložního detektoru. Časy v jeho stopě odpovídají polohám extrémů.
+Z více chybových pokusů pro stejný blok se zobrazí ten, který se dostal nejdále.
 
 Pro vědomé uložení pouze dostupných ověřených bloků použijte:
 
@@ -139,7 +156,11 @@ neúspěšném běžném převodu. Existující graf se nepřepisuje.
 
 Graf používá uložené stopy z aktuálního dekódování. V detailu ověřeného bloku
 se zobrazí právě použité nastavení hystereze, uvedené také v jeho JSON položce
-`threshold_fraction`. Pokud detail obsahuje chybové místo, má přednost nastavení
+`threshold_fraction`. U detektoru extrémů tato položka určuje relativní požadavek
+na prominenci; v grafu se zobrazují fialové body ve skutečných maximech a minimech
+příslušného filtrovaného signálu. Tyto body nejsou průchody nulou. Intervaly mezi
+extrémy a jejich histogram mají vlastní popisky a referenci pro přechod 0 ↔ 1.
+Pokud detail obsahuje chybové místo, má přednost nastavení
 tohoto chybového pokusu. Jinde se použije základní práh `0.06`.
 Referenční délky se kalibrují podle pilotu ověřeného bloku ve středu detailu;
 bez něj jsou nominální pro 3,5 MHz. Histogram pokrývá celý kanál se stejným
@@ -175,3 +196,5 @@ obsahuje skutečnou slabou synchronizaci a zákmit v pilotu. Test vyžaduje pře
 bajty hlavičky v obou polaritách. Protože jde o výřez samotné hlavičky, hlášení
 o chybějícím navazujícím datovém bloku je očekávané. Podrobnosti jsou v
 [popisu vzorku](../../tests/wav2tap/fixtures/README.md).
+Vzorky `desktop_header.wav` a `desktop_dropout.wav` navíc ověřují synchronizaci
+s minimem nad nulou, shodu záložních filtrů a odmítnutí bloku se skutečným výpadkem.

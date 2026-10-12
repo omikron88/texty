@@ -11,7 +11,7 @@ import struct
 import numpy as np
 from scipy.io import wavfile
 from scipy.ndimage import maximum_filter1d, uniform_filter1d
-from scipy.signal import butter, sosfilt, sosfiltfilt, sosfilt_zi
+from scipy.signal import butter, find_peaks, sosfilt, sosfiltfilt, sosfilt_zi
 
 CLOCK = 3_500_000
 PILOT = 2168 / CLOCK
@@ -37,6 +37,8 @@ class Block:
     is_header: bool = False
     data_start: float | None = None
     threshold_fraction: float = 0.06
+    detector: str = "zero_crossing"
+    lowpass_hz: float | None = None
 
     def summary(self):
         result = asdict(self)
@@ -57,6 +59,8 @@ class Issue:
     channel: int
     message: str
     threshold_fraction: float | None = None
+    detector: str = "zero_crossing"
+    lowpass_hz: float | None = None
 
 
 @dataclass
@@ -73,6 +77,9 @@ class SignalAnalysis:
 class DetectionTrace:
     threshold_fraction: float
     edges: np.ndarray
+    detector: str = "zero_crossing"
+    lowpass_hz: float | None = None
+    analysis: SignalAnalysis | None = None
 
 
 @dataclass
@@ -182,11 +189,18 @@ def remove_short_excursions(edges, minimum=MIN_EXCURSION):
     return edges[active]
 
 
-def matches_sync(pair, scale):
+def matches_sync(pair, scale, *, centers=False):
     """Constrain each sync pulse and the whole pair when transition edges shift."""
     expected = SYNC * scale
-    return (np.all(np.abs(pair / expected - 1) <= 0.4)
-            and abs(np.sum(pair) / np.sum(expected) - 1) <= 0.20)
+    standard = (np.all(np.abs(pair / expected - 1) <= 0.4)
+                and abs(np.sum(pair) / np.sum(expected) - 1) <= 0.20)
+    if standard or not centers:
+        return standard
+    # Ideal pulse centers straddle the final pilot/sync boundary. The second
+    # interval must stay below a data-zero interval; do not treat bits as sync.
+    geometric = np.array([(PILOT + SYNC[0]) / 2, np.mean(SYNC)]) * scale
+    return (np.all(np.abs(pair / geometric - 1) <= np.array([.20, .15]))
+            and abs(np.sum(pair) / np.sum(geometric) - 1) <= .15)
 
 
 def is_termination_tail(pulses, index, scale, data, bit_count):
@@ -209,8 +223,35 @@ def edge_times(audio, fs, threshold_fraction=0.06):
     return detect_edges(prepare_signal(audio, fs), fs, threshold_fraction)
 
 
-def decode_edges(edges, channel=0, *, headerless=False):
-    """Decode to the physical block end, independent of flags/header lengths."""
+def extrema_trace(audio, fs, cutoff, noise, fraction=0.08):
+    """Locate alternating maxima/minima even when excursions never cross zero."""
+    highpass = butter(2, 40, btype="highpass", fs=fs, output="sos")
+    filtered, _ = sosfilt(highpass, audio, zi=sosfilt_zi(highpass) * audio[0])
+    filtered = sosfiltfilt(butter(4, cutoff, fs=fs, output="sos"), filtered)
+    envelope = maximum_filter1d(np.abs(filtered), round(fs * .002))
+    analysis = SignalAnalysis(filtered, envelope, noise)
+    prominence = np.maximum(envelope * fraction, 3 * noise)
+    kwargs = dict(prominence=prominence, wlen=round(fs * .003),
+                  distance=max(1, round(fs * MIN_EXCURSION)))
+    high, _ = find_peaks(filtered, **kwargs)
+    low, _ = find_peaks(-filtered, **kwargs)
+    indices = np.sort(np.r_[high, low])
+    positive = np.isin(indices, high)
+    kept = []
+    for index, sign in zip(indices, positive):
+        if kept and sign == kept[-1][1]:
+            if (filtered[index] - filtered[kept[-1][0]]) * (1 if sign else -1) > 0:
+                kept[-1] = (index, sign)
+        else:
+            kept.append((index, sign))
+    centers = np.array([index / fs for index, _ in kept])
+    return DetectionTrace(fraction, centers, "extrema", cutoff, analysis)
+
+
+def decode_edges(edges, channel=0, *, headerless=False, detector="zero_crossing"):
+    """Decode measured edge or center intervals, independent of header lengths."""
+    if detector not in ("zero_crossing", "extrema"):
+        raise ValueError("Neznámý detektor pulzů.")
     pulses = np.diff(edges)
     blocks, issues = [], []
     i = 0
@@ -227,7 +268,8 @@ def decode_edges(edges, channel=0, *, headerless=False):
         if i - begin < MIN_PILOT:
             continue
         scale = float(np.median(pulses[begin:i]) / PILOT)
-        if i + 1 >= len(pulses) or not matches_sync(pulses[i:i + 2], scale):
+        if i + 1 >= len(pulses) or not matches_sync(pulses[i:i + 2], scale,
+                                                   centers=detector == "extrema"):
             issues.append(Issue(float(edges[begin]), float(edges[i]), channel,
                                 "Pilot bez platné synchronizace."))
             continue
@@ -238,6 +280,7 @@ def decode_edges(edges, channel=0, *, headerless=False):
         data = bytearray()
         byte, bit_count = 0, 0
         error = None
+        previous_width = None
         while i + 1 < len(pulses):
             first, second = float(pulses[i]), float(pulses[i + 1])
             mean = (first + second) * 0.5
@@ -245,19 +288,29 @@ def decode_edges(edges, channel=0, *, headerless=False):
                 break
             # Frequency response and unequal amplitudes shift individual edges.
             # The full bit period cancels displacement of its middle edge.
-            distance_zero = abs(mean / (ZERO * scale) - 1)
-            distance_one = abs(mean / (ONE * scale) - 1)
+            # Extrema mark pulse centers. The within-bit interval (second) is
+            # less sensitive to the preceding bit's different pulse length.
+            measured = second if detector == "extrema" else mean
+            distance_zero = abs(measured / (ZERO * scale) - 1)
+            distance_one = abs(measured / (ONE * scale) - 1)
             bit = int(distance_one < distance_zero)
             expected = (ONE if bit else ZERO) * scale
-            if (min(distance_zero, distance_one) > 0.22
-                    or max(abs(first / expected - 1), abs(second / expected - 1)) > 0.4
-                    or abs(first - second) / mean > 0.65):
+            if detector == "extrema":
+                transition = expected if previous_width is None else (previous_width + expected) / 2
+                invalid = (min(distance_zero, distance_one) > .35
+                           or min(abs(first / expected - 1), abs(first / transition - 1)) > .4)
+            else:
+                invalid = (min(distance_zero, distance_one) > 0.22
+                           or max(abs(first / expected - 1), abs(second / expected - 1)) > 0.4
+                           or abs(first - second) / mean > 0.65)
+            if invalid:
                 if is_termination_tail(pulses, i, scale, data, bit_count):
                     break
                 error = "Neplatná dvojice datových pulzů."
                 break
             # Smooth speed updates and limit them to plausible transport drift.
-            observed_scale = mean / (ONE if bit else ZERO)
+            previous_width = expected
+            observed_scale = measured / (ONE if bit else ZERO)
             scale = max(initial_scale * 0.85,
                         min(initial_scale * 1.15, 0.98 * scale + 0.02 * observed_scale))
             byte = (byte << 1) | bit
@@ -282,8 +335,26 @@ def decode_edges(edges, channel=0, *, headerless=False):
             issues.append(Issue(float(edges[begin]), end, channel, error))
         else:
             blocks.append(Block(float(edges[begin]), end, channel, initial_scale, bytes(data),
-                                not headerless and is_standard_header(data), data_start))
+                                not headerless and is_standard_header(data), data_start,
+                                detector=detector))
     return blocks, issues
+
+
+def same_recording_block(first, second):
+    return (min(first.end, second.end) - max(first.start, second.start)
+            > .5 * min(first.end - first.start, second.end - second.start))
+
+
+def issue_covered(issue, blocks):
+    return any(min(block.end, issue.end) - max(block.start, issue.start)
+               > .5 * (issue.end - issue.start) for block in blocks)
+
+
+def extrema_consensus(candidates):
+    """Admit a fallback block only if two independent cutoff settings agree."""
+    return [block for block in candidates if any(
+        peer.lowpass_hz != block.lowpass_hz and peer.data == block.data
+        and same_recording_block(peer, block) for peer in candidates)]
 
 
 def decode_audio(audio, fs, *, headerless=False, diagnostics=None):
@@ -294,6 +365,7 @@ def decode_audio(audio, fs, *, headerless=False, diagnostics=None):
     for channel in range(audio.shape[1]):
         analysis = prepare_signal(audio[:, channel], fs)
         traces = []
+        channel_blocks, channel_issues = [], []
         for fraction in (0.06, 0.025, 0.12):
             edges = detect_edges(analysis, fs, fraction)
             blocks, issues = decode_edges(edges, channel, headerless=headerless)
@@ -301,25 +373,47 @@ def decode_audio(audio, fs, *, headerless=False, diagnostics=None):
                 block.threshold_fraction = fraction
             for issue in issues:
                 issue.threshold_fraction = fraction
-            candidates.extend(blocks)
-            failures.extend(issues)
+            channel_blocks.extend(blocks)
+            channel_issues.extend(issues)
             if diagnostics is not None:
                 traces.append(DetectionTrace(fraction, edges))
+        if any(not issue_covered(issue, channel_blocks) for issue in channel_issues):
+            alternative_blocks = []
+            for cutoff in (3500, 5000):
+                trace = extrema_trace(audio[:, channel], fs, cutoff, analysis.noise)
+                blocks, issues = decode_edges(trace.edges, channel, headerless=headerless,
+                                              detector="extrema")
+                for event in [*blocks, *issues]:
+                    event.threshold_fraction = trace.threshold_fraction
+                    event.detector = trace.detector
+                    event.lowpass_hz = trace.lowpass_hz
+                alternative_blocks.extend(blocks)
+                channel_issues.extend(issues)
+                if diagnostics is not None:
+                    traces.append(trace)
+            confirmed = extrema_consensus(alternative_blocks)
+            channel_blocks.extend(confirmed)
+            for block in alternative_blocks:
+                if block not in confirmed:
+                    channel_issues.append(Issue(block.start, block.end, channel,
+                                                "Blok z extrémů nemá potvrzení druhým filtrem.",
+                                                block.threshold_fraction, block.detector, block.lowpass_hz))
+        candidates.extend(channel_blocks)
+        failures.extend(channel_issues)
         if diagnostics is not None:
             diagnostics.append(ChannelDiagnostics(channel, analysis, traces))
 
     groups = []
     for block in sorted(candidates, key=lambda b: (b.start, b.channel)):
         matching = next((group for group in groups
-                         if min(group[0].end, block.end) - max(group[0].start, block.start)
-                         > 0.5 * min(group[0].end - group[0].start, block.end - block.start)), None)
+                         if same_recording_block(group[0], block)), None)
         if matching is None:
             groups.append([block])
         else:
             matching.append(block)
     selected, conflicts = [], []
     for group in groups:
-        block = group[0]
+        block = next((candidate for candidate in group if candidate.detector == "zero_crossing"), group[0])
         if len({candidate.data for candidate in group}) != 1:
             # Even --allow-partial must never choose an ambiguous XOR collision.
             conflicts.append(Issue(block.start, block.end, block.channel,
@@ -329,11 +423,14 @@ def decode_audio(audio, fs, *, headerless=False, diagnostics=None):
 
     unresolved = []
     for issue in failures:
-        covered = any(min(block.end, issue.end) - max(block.start, issue.start)
-                      > 0.5 * (issue.end - issue.start) for block in selected)
-        duplicate = any(abs(previous.start - issue.start) < 0.1 for previous in unresolved)
-        if not covered and not duplicate:
+        if issue_covered(issue, selected):
+            continue
+        duplicate = next((index for index, previous in enumerate(unresolved)
+                          if abs(previous.start - issue.start) < .1), None)
+        if duplicate is None:
             unresolved.append(issue)
+        elif issue.end > unresolved[duplicate].end:
+            unresolved[duplicate] = issue
     unresolved.extend(conflicts)
     # Validate header/data relationships after merging stereo channels.
     for index, block in enumerate(selected):
