@@ -47,13 +47,24 @@ Pokud některý blok nezvládne detektor průchodů nulou, automaticky se vyzkou
 záložní detektor střídajících se maxim a minim. Umí najít i kmit, jehož minimum
 zůstává nad nulou, nebo maximum pod nulou. Používá dvě dolní propusti,
 3500 a 5000 Hz, a lokální požadavek na prominenci extrémů s podlahou podle šumu.
+Odhad vstupního šumu přepočítává podle šířky pásma každé dolní propusti,
+včetně dvojího průchodu při filtraci bez fázového posunu. Pro každý filtr zkouší
+prominenci 8 %, 4 % a 2 % místní obálky s podlahou 3σ. Další citlivý pokus
+vyžaduje 0,5 % obálky a 1σ; umožňuje zachytit velmi mělké, ale skutečně přítomné
+extrémy. Filtrovaná data se mezi pokusy sdílejí.
 Nový blok přijme pouze při shodě všech bajtů mezi oběma filtry, platném XOR
 a stejné časové poloze. Ověřené výsledky průchodů nulou mají přednost.
 
-Extrémy označují středy pulzů. Bit se proto rozlišuje podle intervalu uvnitř
-dvojice; interval přes hranici bitů se kontroluje také vůči předchozí délce.
-Povolena je až 35% odchylka vnitřního intervalu. Synchronizace zahrnuje geometrii
-středů na přechodu z pilotu. Tento režim nedoplňuje chybějící pulzy ani neopravuje
+Extrémy přibližně označují středy pulzů, ale kmitočtová závislost záznamu jejich
+polohy posouvá. Bit se rozlišuje podle celé dvojice s nejvýše 22% odchylkou
+její délky. Kontroluje se přitom běžná geometrie i přechodová délka podle
+předchozího bitu. Vnitřní extrém smí být výrazně posunutý: jednotlivé intervaly
+musí zůstat v rozmezí 20–180 % své modelové délky. Rychlost se aktualizuje z celé
+dvojice, nikoli ze samotného posunutého půlpulzu.
+Synchronizace zahrnuje geometrii středů na přechodu z pilotu i rozšířený přechod,
+v němž jsou slabé synchronizační kmity slité nebo tvoří jen mělký krátký zákmit.
+Krátký zákmit může navazovat na interval, který ještě vypadal jako poslední
+pilotní pulz. Tento režim nedoplňuje chybějící datové pulzy ani neopravuje
 bajty. Shoda filtrů a XOR zvyšují důvěryhodnost, nejsou silnou kontrolou integrity.
 Skutečný výpadek signálu může nadále znemožnit načtení celého bloku.
 
@@ -96,7 +107,8 @@ Protokol JSON se přesto uloží, byl-li požadován. Obsahuje pozice bloků,
 délky, názvy z hlaviček, kanál a rychlostní faktor: hodnota nad 1 znamená
 delší pulzy než nominální. Čísla kanálů v JSON jsou od nuly; textový výpis od jedné.
 Položka `detector` uvádí `zero_crossing` nebo `extrema`; `lowpass_hz` identifikuje
-filtr záložního detektoru. Časy v jeho stopě odpovídají polohám extrémů.
+filtr záložního detektoru. `noise_multiplier` uvádí použitý násobek odhadu šumu
+(3, případně 1 v citlivém pokusu). Časy v jeho stopě odpovídají polohám extrémů.
 Z více chybových pokusů pro stejný blok se zobrazí ten, který se dostal nejdále.
 
 Pro vědomé uložení pouze dostupných ověřených bloků použijte:
@@ -170,7 +182,8 @@ Přehled používá minima a maxima vzorků v časových oknech, aby nezmizely k
 výpadky. Stejně se zjednodušují dlouhé detaily; u více než 1500 hran se vykreslí
 jejich podmnožina a v titulku je zobrazený/celkový počet. Pro jednotlivé pulzy
 použijte krátké přiblížení. Diagnostika uchovává filtrované signály a tři sady
-hran každého kanálu, proto má vyšší paměťové nároky než samotný převod.
+hran průchodů nulou a případné stopy záložního detektoru každého kanálu,
+proto má vyšší paměťové nároky než samotný převod.
 
 ## Ověření
 
@@ -198,3 +211,7 @@ o chybějícím navazujícím datovém bloku je očekávané. Podrobnosti jsou v
 [popisu vzorku](../../tests/wav2tap/fixtures/README.md).
 Vzorky `desktop_header.wav` a `desktop_dropout.wav` navíc ověřují synchronizaci
 s minimem nad nulou, shodu záložních filtrů a odmítnutí bloku se skutečným výpadkem.
+Výřezy nového načtení `desktop_new_header.wav`, `desktop_new_code_header.wav`
+a `desktop_new_weak_zero.wav` ověřují rozšířenou synchronizaci, silně posunutý
+vnitřní extrém krátkého pulzu a čtení v obou polaritách. Samostatný test měří
+útlum bílého šumu skutečnou filtrací a porovnává jej s odhadem šumové podlahy.

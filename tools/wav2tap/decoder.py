@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from functools import reduce
 import heapq
 from operator import xor
@@ -11,7 +11,7 @@ import struct
 import numpy as np
 from scipy.io import wavfile
 from scipy.ndimage import maximum_filter1d, uniform_filter1d
-from scipy.signal import butter, find_peaks, sosfilt, sosfiltfilt, sosfilt_zi
+from scipy.signal import butter, find_peaks, sosfilt, sosfiltfilt, sosfilt_zi, sosfreqz
 
 CLOCK = 3_500_000
 PILOT = 2168 / CLOCK
@@ -39,6 +39,7 @@ class Block:
     threshold_fraction: float = 0.06
     detector: str = "zero_crossing"
     lowpass_hz: float | None = None
+    noise_multiplier: float = 3.0
 
     def summary(self):
         result = asdict(self)
@@ -61,6 +62,7 @@ class Issue:
     threshold_fraction: float | None = None
     detector: str = "zero_crossing"
     lowpass_hz: float | None = None
+    noise_multiplier: float = 3.0
 
 
 @dataclass
@@ -68,9 +70,10 @@ class SignalAnalysis:
     filtered: np.ndarray
     envelope: np.ndarray
     noise: float
+    noise_multiplier: float = 3.0
 
     def threshold(self, fraction):
-        return np.maximum(fraction * self.envelope, 3 * self.noise)
+        return np.maximum(fraction * self.envelope, self.noise_multiplier * self.noise)
 
 
 @dataclass
@@ -223,14 +226,24 @@ def edge_times(audio, fs, threshold_fraction=0.06):
     return detect_edges(prepare_signal(audio, fs), fs, threshold_fraction)
 
 
-def extrema_trace(audio, fs, cutoff, noise, fraction=0.08):
-    """Locate alternating maxima/minima even when excursions never cross zero."""
+def prepare_extrema_signal(audio, fs, cutoff, noise):
+    """Filter once per cutoff and project white input noise into that bandwidth."""
     highpass = butter(2, 40, btype="highpass", fs=fs, output="sos")
     filtered, _ = sosfilt(highpass, audio, zi=sosfilt_zi(highpass) * audio[0])
-    filtered = sosfiltfilt(butter(4, cutoff, fs=fs, output="sos"), filtered)
+    lowpass = butter(4, cutoff, fs=fs, output="sos")
+    filtered = sosfiltfilt(lowpass, filtered)
     envelope = maximum_filter1d(np.abs(filtered), round(fs * .002))
-    analysis = SignalAnalysis(filtered, envelope, noise)
-    prominence = np.maximum(envelope * fraction, 3 * noise)
+    _, response = sosfreqz(lowpass, worN=2048)
+    # Forward/backward filtering squares the amplitude response. Integrating
+    # its fourth power gives the variance gain for white input noise.
+    noise_gain = float(np.sqrt(np.mean(np.abs(response) ** 4)))
+    return SignalAnalysis(filtered, envelope, noise * noise_gain)
+
+
+def detect_extrema(analysis, fs, cutoff, fraction=0.08):
+    """Locate alternating extrema without requiring a crossing of zero."""
+    filtered = analysis.filtered
+    prominence = analysis.threshold(fraction)
     kwargs = dict(prominence=prominence, wlen=round(fs * .003),
                   distance=max(1, round(fs * MIN_EXCURSION)))
     high, _ = find_peaks(filtered, **kwargs)
@@ -246,6 +259,58 @@ def extrema_trace(audio, fs, cutoff, noise, fraction=0.08):
             kept.append((index, sign))
     centers = np.array([index / fs for index, _ in kept])
     return DetectionTrace(fraction, centers, "extrema", cutoff, analysis)
+
+
+def extrema_trace(audio, fs, cutoff, noise, fraction=0.08):
+    return detect_extrema(prepare_extrema_signal(audio, fs, cutoff, noise),
+                          fs, cutoff, fraction)
+
+
+def extrema_sync_start(pulses, index, begin, scale):
+    """Recognize a broadened sync, optionally containing a tiny retained ripple.
+
+    The last pilot and two weak sync lobes can form one measured interval.
+    A retained max/min pair splits it into three intervals. The pilot scanner
+    may consume the first of those when it still resembles a pilot pulse.
+    Only the sync prefix is consumed; no data pulse or bit is manufactured.
+    """
+    expected = (PILOT + float(np.sum(SYNC))) * scale
+    if .85 <= pulses[index] / expected <= 1.15:
+        return index + 1
+    for start in (index, index - 1):
+        if start - begin < MIN_PILOT or start + 2 >= len(pulses):
+            continue
+        prefix = pulses[start:start + 3]
+        if (.85 <= float(np.sum(prefix)) / expected <= 1.15
+                and prefix[1] < MIN_EXCURSION * 1.8):
+            return start + 3
+    return None
+
+
+def classify_extrema_pair(first, second, scale, previous_width):
+    """Use the full period; middle extrema can shift greatly on weak zeros.
+
+    Both edge-like and center-like timing occur with a frequency-dependent
+    tape response. Rank their physical period templates by absolute timing
+    error, without using checksum bytes to choose a candidate.
+    """
+    choices = []
+    for bit, width in ((0, ZERO * scale), (1, ONE * scale)):
+        transitions = [width]
+        if previous_width is not None:
+            transitions.append((previous_width + width) / 2)
+        for model, transition in enumerate(transitions):
+            total = transition + width
+            error = abs(first + second - total)
+            if (error / total <= .22 and abs(second / width - 1) <= .8
+                    and abs(first / transition - 1) <= .8):
+                choices.append((error, bit, width, model))
+    if not choices:
+        return None
+    _, bit, width, model = min(choices)
+    measured = ((first + second) / 2 if model == 0 else
+                (2 * (first + second) - previous_width) / 3)
+    return bit, width, measured
 
 
 def decode_edges(edges, channel=0, *, headerless=False, detector="zero_crossing"):
@@ -268,14 +333,19 @@ def decode_edges(edges, channel=0, *, headerless=False, detector="zero_crossing"
         if i - begin < MIN_PILOT:
             continue
         scale = float(np.median(pulses[begin:i]) / PILOT)
-        if i + 1 >= len(pulses) or not matches_sync(pulses[i:i + 2], scale,
-                                                   centers=detector == "extrema"):
+        sync_end = None
+        if i + 1 < len(pulses):
+            if matches_sync(pulses[i:i + 2], scale, centers=detector == "extrema"):
+                sync_end = i + 2
+            elif detector == "extrema":
+                sync_end = extrema_sync_start(pulses, i, begin, scale)
+        if sync_end is None:
             issues.append(Issue(float(edges[begin]), float(edges[i]), channel,
                                 "Pilot bez platné synchronizace."))
             continue
 
         initial_scale = scale
-        i += 2
+        i = sync_end
         data_start = float(edges[i])
         data = bytearray()
         byte, bit_count = 0, 0
@@ -288,17 +358,16 @@ def decode_edges(edges, channel=0, *, headerless=False, detector="zero_crossing"
                 break
             # Frequency response and unequal amplitudes shift individual edges.
             # The full bit period cancels displacement of its middle edge.
-            # Extrema mark pulse centers. The within-bit interval (second) is
-            # less sensitive to the preceding bit's different pulse length.
-            measured = second if detector == "extrema" else mean
+            measured = mean
             distance_zero = abs(measured / (ZERO * scale) - 1)
             distance_one = abs(measured / (ONE * scale) - 1)
             bit = int(distance_one < distance_zero)
             expected = (ONE if bit else ZERO) * scale
             if detector == "extrema":
-                transition = expected if previous_width is None else (previous_width + expected) / 2
-                invalid = (min(distance_zero, distance_one) > .35
-                           or min(abs(first / expected - 1), abs(first / transition - 1)) > .4)
+                choice = classify_extrema_pair(first, second, scale, previous_width)
+                invalid = choice is None
+                if choice is not None:
+                    bit, expected, measured = choice
             else:
                 invalid = (min(distance_zero, distance_one) > 0.22
                            or max(abs(first / expected - 1), abs(second / expected - 1)) > 0.4
@@ -377,27 +446,34 @@ def decode_audio(audio, fs, *, headerless=False, diagnostics=None):
             channel_issues.extend(issues)
             if diagnostics is not None:
                 traces.append(DetectionTrace(fraction, edges))
-        if any(not issue_covered(issue, channel_blocks) for issue in channel_issues):
+        if not channel_blocks or any(not issue_covered(issue, channel_blocks) for issue in channel_issues):
             alternative_blocks = []
             for cutoff in (3500, 5000):
-                trace = extrema_trace(audio[:, channel], fs, cutoff, analysis.noise)
-                blocks, issues = decode_edges(trace.edges, channel, headerless=headerless,
-                                              detector="extrema")
-                for event in [*blocks, *issues]:
-                    event.threshold_fraction = trace.threshold_fraction
-                    event.detector = trace.detector
-                    event.lowpass_hz = trace.lowpass_hz
-                alternative_blocks.extend(blocks)
-                channel_issues.extend(issues)
-                if diagnostics is not None:
-                    traces.append(trace)
+                filtered = prepare_extrema_signal(audio[:, channel], fs, cutoff, analysis.noise)
+                for fraction, noise_multiplier in ((.08, 3), (.04, 3), (.02, 3), (.005, 1)):
+                    # The sensitive attempt still needs complete XOR-verified
+                    # bytes from both cutoffs. Share large arrays between trials.
+                    trial = replace(filtered, noise_multiplier=noise_multiplier)
+                    trace = detect_extrema(trial, fs, cutoff, fraction)
+                    blocks, issues = decode_edges(trace.edges, channel, headerless=headerless,
+                                                  detector="extrema")
+                    for event in [*blocks, *issues]:
+                        event.threshold_fraction = trace.threshold_fraction
+                        event.detector = trace.detector
+                        event.lowpass_hz = trace.lowpass_hz
+                        event.noise_multiplier = noise_multiplier
+                    alternative_blocks.extend(blocks)
+                    channel_issues.extend(issues)
+                    if diagnostics is not None:
+                        traces.append(trace)
             confirmed = extrema_consensus(alternative_blocks)
             channel_blocks.extend(confirmed)
             for block in alternative_blocks:
                 if block not in confirmed:
                     channel_issues.append(Issue(block.start, block.end, channel,
                                                 "Blok z extrémů nemá potvrzení druhým filtrem.",
-                                                block.threshold_fraction, block.detector, block.lowpass_hz))
+                                                block.threshold_fraction, block.detector, block.lowpass_hz,
+                                                block.noise_multiplier))
         candidates.extend(channel_blocks)
         failures.extend(channel_issues)
         if diagnostics is not None:

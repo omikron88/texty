@@ -8,7 +8,9 @@ import unittest
 import numpy as np
 
 from tools.wav2tap.decoder import (Block, ONE, PILOT, SYNC, ZERO, decode_audio,
-                                  decode_edges, extrema_consensus, read_wav)
+                                  classify_extrema_pair, decode_edges, detect_extrema,
+                                  extrema_consensus, extrema_sync_start,
+                                  prepare_extrema_signal, read_wav)
 from tools.wav2tap.plotting import build_figure
 from test_decoder import with_checksum
 
@@ -52,7 +54,81 @@ class ExtremaTests(unittest.TestCase):
         self.assertEqual([], blocks)
         failures = [issue for issue in issues if issue.detector == "extrema"]
         self.assertTrue(failures)
-        self.assertAlmostEqual(29.608625 - 26.2, failures[0].end, delta=.002)
+        # Filtering may reject an already fading pulse just before the gap.
+        self.assertAlmostEqual(29.608625 - 26.2, failures[0].end, delta=.015)
+
+    def test_new_capture_headers_with_broadened_sync_and_displaced_centers(self):
+        cases = [("desktop_new_header.wav", "00004445534b544f5020202069080a005a0043"),
+                 ("desktop_new_code_header.wav", "00036465736b746f70426364df6e885e333858")]
+        for filename, expected in cases:
+            fs, audio = read_wav(FIXTURES / filename)
+            for sign in (1, -1):
+                with self.subTest(filename=filename, sign=sign):
+                    blocks, issues = decode_audio(sign * audio, fs, headerless=True)
+                    self.assertEqual([bytes.fromhex(expected)], [block.data for block in blocks])
+                    self.assertEqual([], issues)
+                    self.assertEqual("extrema", blocks[0].detector)
+
+    def test_noise_floor_matches_measured_filtered_white_noise(self):
+        fs = 48000
+        audio = np.random.default_rng(714).normal(size=fs * 2)
+        for cutoff in (3500, 5000):
+            with self.subTest(cutoff=cutoff):
+                analysis = prepare_extrema_signal(audio, fs, cutoff, noise=1)
+                measured = np.std(analysis.filtered[fs // 10:-fs // 10])
+                self.assertAlmostEqual(measured, analysis.noise, delta=.02)
+
+    def test_actual_weak_zero_is_detected_without_inventing_extrema(self):
+        fs, audio = read_wav(FIXTURES / "desktop_new_weak_zero.wav")
+        for sign in (1, -1):
+            for cutoff in (3500, 5000):
+                with self.subTest(sign=sign, cutoff=cutoff):
+                    analysis = prepare_extrema_signal(sign * audio[:, 0], fs, cutoff,
+                                                      noise=.003047774765)
+                    trace = detect_extrema(replace(analysis, noise_multiplier=1),
+                                           fs, cutoff, fraction=.005)
+                    center = 189.779583333 - 189.75
+                    index = np.argmin(abs(trace.edges - center))
+                    self.assertAlmostEqual(center, trace.edges[index], delta=1 / fs)
+                    first, second = np.diff(trace.edges[index:index + 3])
+                    self.assertLess(first, 90e-6)
+                    choice = classify_extrema_pair(first, second, 1.02, ONE * 1.02)
+                    self.assertIsNotNone(choice)
+                    self.assertEqual(0, choice[0])
+                    for edge in trace.edges[index:index + 3]:
+                        sample = round(edge * fs)
+                        value = analysis.filtered[sample]
+                        neighbors = analysis.filtered[[sample - 1, sample + 1]]
+                        self.assertTrue(np.all(value > neighbors) or np.all(value < neighbors))
+
+    def test_full_period_handles_large_middle_center_displacement(self):
+        data = with_checksum(b"\xff" + bytes(range(256)))
+        centers = ideal_centers(data)
+        # Move only each within-bit center, preserving both endpoints of the
+        # full bit period. Classification by that single half would fail.
+        for index in range(514, len(centers) - 1, 2):
+            width = min(centers[index] - centers[index - 1],
+                        centers[index + 1] - centers[index])
+            centers[index] += .70 * width
+        blocks, issues = decode_edges(centers, detector="extrema")
+        self.assertEqual([data], [block.data for block in blocks])
+        self.assertEqual([], issues)
+
+    def test_sensitive_trials_do_not_supply_consensus_from_one_filter(self):
+        data = with_checksum(b"\xfftest")
+        block = Block(0, 1, 0, 1, data, detector="extrema", lowpass_hz=3500)
+        sensitive = replace(block, threshold_fraction=.005, noise_multiplier=1)
+        self.assertEqual([], extrema_consensus([block, sensitive]))
+
+    def test_broadened_sync_accepts_short_ripple_and_pilot_overshoot_only(self):
+        pulses = np.r_[[PILOT] * 512, np.array([541, 125, 250]) * 1e-6]
+        for index in (512, 513):
+            with self.subTest(index=index):
+                self.assertEqual(515, extrema_sync_start(pulses, index, 0, 1))
+        data_pairs = np.r_[[PILOT] * 512, [ONE, ZERO, ONE]]
+        self.assertIsNone(extrema_sync_start(data_pairs, 512, 0, 1))
+        too_short_pilot = pulses[300:]
+        self.assertIsNone(extrema_sync_start(too_short_pilot, 212, 0, 1))
 
     def test_center_geometry_handles_mixed_bits(self):
         data = with_checksum(b"\xff" + bytes(range(256)))
