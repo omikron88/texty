@@ -69,19 +69,24 @@ def _trace_for_window(diagnostic, blocks, issues, start, end):
                        and start <= issue.end <= end and issue.threshold_fraction is not None]
     relevant_blocks = [block for block in blocks if block.channel == diagnostic.channel
                        and block.start <= center <= block.end]
-    fraction = (relevant_issues[0].threshold_fraction if relevant_issues else
-                relevant_blocks[0].threshold_fraction if relevant_blocks else 0.06)
-    trace = next(trace for trace in diagnostic.traces if trace.threshold_fraction == fraction)
+    event = relevant_issues[0] if relevant_issues else relevant_blocks[0] if relevant_blocks else None
+    fraction = event.threshold_fraction if event else 0.06
+    detector = event.detector if event else "zero_crossing"
+    cutoff = event.lowpass_hz if event else None
+    trace = next(trace for trace in diagnostic.traces if trace.threshold_fraction == fraction
+                 and trace.detector == detector and trace.lowpass_hz == cutoff)
     speed = relevant_blocks[0].speed if relevant_blocks else 1.0
     return trace, speed, bool(relevant_blocks)
 
 
-def _references(ax, speed, *, vertical=False):
+def _references(ax, speed, *, vertical=False, extrema=False):
     entries = [(SYNC[0], "Synchronizace", "#a855a1"),
                (SYNC[1], None, "#a855a1"),
                (ZERO, "Bit 0", "#2980b9"),
                (ONE, "Bit 1", "#e67e22"),
                (PILOT, "Pilot", "#16a085")]
+    if extrema:
+        entries.append(((ZERO + ONE) / 2, "Přechod 0 ↔ 1", "#64748b"))
     for value, label, color in entries:
         if vertical:
             ax.axvline(value * speed * 1e6, color=color, ls="--", lw=1, label=label)
@@ -109,8 +114,10 @@ def build_figure(audio, fs, blocks, issues, diagnostics, *, start=None, duration
         channel = diagnostic.channel
         overview, detail, pulses, histogram = axes[:, column]
         trace, speed, calibrated = _trace_for_window(diagnostic, blocks, issues, start, end)
-        filtered = diagnostic.analysis.filtered
-        threshold = diagnostic.analysis.threshold(trace.threshold_fraction)
+        analysis = trace.analysis if trace.analysis is not None else diagnostic.analysis
+        filtered = analysis.filtered
+        threshold = analysis.threshold(trace.threshold_fraction)
+        extrema = trace.detector == "extrema"
 
         _wave(overview, audio[:, channel], fs, 0, total, "Původní WAV", "#64748b", 3200)
         _mark_intervals(overview, blocks, issues, channel, labels=True)
@@ -121,17 +128,25 @@ def build_figure(audio, fs, blocks, issues, diagnostics, *, start=None, duration
 
         _wave(detail, audio[:, channel], fs, start, end, "Původní WAV", "#94a3b8")
         _wave(detail, filtered, fs, start, end, "Filtrovaný signál", "#2563eb")
-        _wave(detail, threshold, fs, start, end, "Prahy hystereze", "#d97706")
-        _wave(detail, -threshold, fs, start, end, None, "#d97706")
+        if not extrema:
+            _wave(detail, threshold, fs, start, end, "Prahy hystereze", "#d97706")
+            _wave(detail, -threshold, fs, start, end, None, "#d97706")
         left, right = np.searchsorted(trace.edges, [start, end])
         edges = trace.edges[left:right]
         visible_edges = edges[::max(1, int(np.ceil(len(edges) / 1500)))]
-        detail.vlines(visible_edges, 0, 1, transform=detail.get_xaxis_transform(),
-                      color="#7c3aed", alpha=0.3, lw=0.7, label="Potvrzené hrany")
+        if extrema:
+            samples = np.clip(np.rint(visible_edges * fs).astype(int), 0, len(filtered) - 1)
+            detail.scatter(visible_edges, filtered[samples],
+                           color="#7c3aed", s=16, label="Extrémy / středy pulzů")
+        else:
+            detail.vlines(visible_edges, 0, 1, transform=detail.get_xaxis_transform(),
+                          color="#7c3aed", alpha=0.3, lw=0.7, label="Potvrzené hrany")
         detail.axhline(0, color="#475569", lw=0.6)
         _mark_intervals(detail, blocks, issues, channel)
         suffix = f" · zobrazeno {len(visible_edges)}/{len(edges)} hran" if len(edges) > 1500 else ""
-        detail.set(title=f"Detail — práh {trace.threshold_fraction:g} × obálka{suffix}",
+        title = (f"Extrémy — filtr {trace.lowpass_hz:g} Hz, prominence {trace.threshold_fraction:g}"
+                 if extrema else f"Detail — práh {trace.threshold_fraction:g} × obálka")
+        detail.set(title=title + suffix,
                    xlabel="Čas [s]", ylabel="Amplituda", xlim=(start, end))
         detail.legend(loc="upper right", fontsize=8, ncol=2)
 
@@ -139,24 +154,26 @@ def build_figure(audio, fs, blocks, issues, diagnostics, *, start=None, duration
         lengths = np.diff(edges) * 1e6
         times = (edges[:-1] + edges[1:]) / 2
         stride = max(1, int(np.ceil(len(lengths) / 8000)))
-        pulses.scatter(times[::stride], lengths[::stride], s=12, color="#475569", label="Naměřené pulzy")
-        _references(pulses, speed)
+        pulses.scatter(times[::stride], lengths[::stride], s=12, color="#475569",
+                       label="Intervaly extrémů" if extrema else "Naměřené pulzy")
+        _references(pulses, speed, extrema=extrema)
         _mark_intervals(pulses, blocks, issues, channel)
         limit = max(1000, PILOT * speed * 1e6 * 1.6)
         above = int(np.count_nonzero(lengths > limit))
         caption = f"Referenční délky — {'kalibrace pilotem' if calibrated else 'nominální 3,5 MHz'}"
         if above:
             caption += f" · {above} pulzů nad rozsahem"
-        pulses.set(title=caption, xlabel="Čas [s]", ylabel="Délka pulzu [µs]",
+        duration_label = "Interval extrémů [µs]" if extrema else "Délka pulzu [µs]"
+        pulses.set(title=caption, xlabel="Čas [s]", ylabel=duration_label,
                    xlim=(start, end), ylim=(0, limit))
         pulses.legend(loc="upper right", fontsize=8, ncol=3)
 
         all_lengths = np.diff(trace.edges) * 1e6
         counts, bins = np.histogram(all_lengths, bins=120, range=(0, limit))
         histogram.stairs(counts, bins, fill=True, color="#64748b", alpha=0.55)
-        _references(histogram, speed, vertical=True)
+        _references(histogram, speed, vertical=True, extrema=extrema)
         histogram.set(title="Histogram celého kanálu — pulzy mimo rozsah: "
-                      f"{np.count_nonzero(all_lengths > limit)}", xlabel="Délka pulzu [µs]", ylabel="Počet pulzů",
+                      f"{np.count_nonzero(all_lengths > limit)}", xlabel=duration_label, ylabel="Počet intervalů",
                       xlim=(0, limit), yscale="symlog")
         histogram.legend(loc="upper right", fontsize=8)
         for axis in axes[:, column]:
@@ -167,7 +184,7 @@ def build_figure(audio, fs, blocks, issues, diagnostics, *, start=None, duration
         messages.append(f"Dalších {len(issues) - 4} hlášení je v JSON protokolu (volba --report).")
     if not messages:
         messages = ["Bez chybových hlášení. Zelené úseky: bloky přijaté do výsledku; "
-                    "svislé fialové čáry: hrany z uvedeného nastavení detektoru."]
+                    "fialové čáry: hrany; fialové body: středy pulzů z detektoru extrémů."]
     figure.text(0.035, 0.012, "\n".join(messages), fontsize=9, color="#475569")
     figure.tight_layout(rect=(0, 0.025 + 0.014 * len(messages), 1, 0.955))
     return figure
