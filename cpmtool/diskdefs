@@ -1,0 +1,35 @@
+# Základní geometrie; lze nahradit souborem diskdefs z cpmtools.
+# tracks je počet logických stop v pořadí raw obrazu (včetně obou stran).
+diskdef ibm-3740
+  seclen 128
+  tracks 77
+  sectrk 26
+  blocksize 1024
+  maxdir 64
+  skew 6
+  boottrk 2
+  os 2.2
+end
+
+diskdef cpm86-720
+  seclen 512
+  tracks 160
+  sectrk 9
+  blocksize 2048
+  maxdir 256
+  skew 1
+  boottrk 2
+  os 3
+end
+
+# Větší bloky a dva logické extenty v jedné položce adresáře.
+diskdef pc1.2m
+  seclen 512
+  tracks 80
+  sectrk 30
+  blocksize 4096
+  maxdir 256
+  skew 1
+  boottrk 0
+  os 3
+end
