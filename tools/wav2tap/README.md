@@ -76,6 +76,57 @@ Standardní hlavička má 19 bajtů; kontroluje se také
 přítomnost a délka následujícího datového bloku. TAP nezachovává skutečnou
 rychlost ani časové rozestupy na kazetě.
 
+## Ekvalizace kazety
+
+Volitelný FIR ekvalizér zvýrazňuje vyšší frekvence, aby kompenzoval slabší
+krátké pulzy. Současně potlačuje zvuk pod pilotním tónem a vysokofrekvenční šum.
+Zapíná se přepínačem:
+
+```bash
+python3 -m tools.wav2tap kazeta.wav program.tap --equalize --report program.json
+```
+
+Výchozí charakteristika má:
+
+- útlum přibližně −40 dB do 500 Hz, potom přechod k pilotní frekvenci;
+- 0 dB kolem pilotu 807 Hz;
+- postupný růst v dB podle logaritmu frekvence až na +15 dB při 4500 Hz;
+- přechod z horní meze na −40 dB při 5500 Hz a tento útlum výše.
+
+Zesílení a frekvence lze nastavit podle konkrétní kazety, například:
+
+```bash
+python3 -m tools.wav2tap kazeta.wav program.tap --equalize \
+    --eq-pilot-hz 807 --eq-high-hz 4000 --eq-gain-db 12
+```
+
+`--eq-pilot-hz` určuje bod s 0 dB; spodní útlumové pásmo končí na 62 % této
+frekvence. `--eq-high-hz` určuje konec zesilovaného pásma; o 1000 Hz výše začíná
+horní útlumové pásmo. `--eq-gain-db` určuje zisk na horní mezi, v rozsahu 0–30 dB.
+Pilot musí mít kladnou frekvenci pod horní mezí a horní mez + 1000 Hz musí ležet
+pod polovinou vzorkovací frekvence WAV. Volby `--eq-*` vyžadují `--equalize`.
+
+Filtr se navrhuje funkcí SciPy `firwin2`. Má lineární fázi a lichý počet
+koeficientů (1025 při 48 kHz, přibližně 21 ms při ostatních frekvencích).
+Středovaná konvoluce kompenzuje zpoždění, takže časy bloků zůstávají vztažené
+k původnímu WAV. Každý kanál se filtruje samostatně v plovoucí čárce, bez ořezu
+zesílených špiček. Původní WAV se nemění. Šumové prahy se odvozují z původního
+odhadu šumu a společné frekvenční charakteristiky ekvalizéru i následné propusti.
+
+Zapnutí ekvalizace přidá další pokus o čtení. Převodník vyhodnotí původní
+i ekvalizovanou stopu a sloučí ověřené bloky. To zachovává čitelné bloky i tehdy,
+když konkrétní křivka změní tvar synchronizace. Záložní detektor extrémů
+vyžaduje i na ekvalizované stopě shodu všech bajtů při obou dolních propustích.
+Pokud stopy vytvoří různé bajty s platným XOR, blok se odmítne jako nejednoznačný.
+Ekvalizace neopravuje chybějící data při skutečném výpadku signálu.
+
+JSON obsahuje nastavení v `equalizer` (bez přepínače `null`) a u každého bloku
+i chybového pokusu příznak `equalized`. Ten označuje skutečně použitou stopu,
+nikoli pouze zapnutí přepínače. Detail grafu používá odpovídající filtrované
+vzorky; pro ekvalizovanou stopu uvádí v titulku `EQ`, zisk a horní mez.
+Původní průběh WAV zůstává v grafu dostupný pro porovnání. Ekvalizace zvyšuje
+dobu převodu a s diagnostikou také paměťové nároky.
+
 ## Bloky bez hlavičky
 
 Běžné bloky bez hlavičky se rozpoznávají automaticky. Mohou mít libovolný
@@ -215,3 +266,9 @@ Výřezy nového načtení `desktop_new_header.wav`, `desktop_new_code_header.wa
 a `desktop_new_weak_zero.wav` ověřují rozšířenou synchronizaci, silně posunutý
 vnitřní extrém krátkého pulzu a čtení v obou polaritách. Samostatný test měří
 útlum bílého šumu skutečnou filtrací a porovnává jej s odhadem šumové podlahy.
+Testy ekvalizéru měří frekvenční charakteristiku sinusovými signály při různých
+vzorkovacích frekvencích, kompenzaci zpoždění a šum za kombinovanou filtrací.
+Nezávislý model kazety s oslabenými vyššími frekvencemi a rušením ověřuje obnovu
+dat, která bez ekvalizace nejsou čitelná, také ve stereu a opačné polaritě.
+Ověřují se skutečné hlavičky, odmítnutí výpadku i nesprávného XOR, CLI nastavení,
+JSON metadata a skutečné vzorky ekvalizované stopy v grafu.

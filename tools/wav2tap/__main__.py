@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 
 from .decoder import decode_audio, read_wav, tap_bytes
+from .equalizer import EqualizerSettings
 
 
 def main():
@@ -24,7 +25,25 @@ def main():
                         help="Všechny bloky chápat jako data bez hlaviček")
     parser.add_argument("--allow-partial", action="store_true",
                         help="Uložit ověřené bloky i při chybách jinde v nahrávce")
+    parser.add_argument("--equalize", action="store_true",
+                        help="Vyzkoušet také ekvalizovanou stopu pro slabé krátké pulzy")
+    parser.add_argument("--eq-pilot-hz", type=float,
+                        help="Frekvence pilotu s 0 dB (výchozí přibližně 807 Hz)")
+    parser.add_argument("--eq-high-hz", type=float,
+                        help="Horní mez zesilovaného pásma (výchozí 4500 Hz)")
+    parser.add_argument("--eq-gain-db", type=float,
+                        help="Zisk na horní mezi, 0 až 30 dB (výchozí 15 dB)")
     args = parser.parse_args()
+    if not args.equalize and any(value is not None for value in
+                                 (args.eq_pilot_hz, args.eq_high_hz, args.eq_gain_db)):
+        parser.error("Volby --eq-* vyžadují --equalize.")
+    equalizer = None
+    if args.equalize:
+        defaults = EqualizerSettings()
+        equalizer = EqualizerSettings(
+            pilot_hz=args.eq_pilot_hz if args.eq_pilot_hz is not None else defaults.pilot_hz,
+            high_hz=args.eq_high_hz if args.eq_high_hz is not None else defaults.high_hz,
+            gain_db=args.eq_gain_db if args.eq_gain_db is not None else defaults.gain_db)
     if args.diagnostics_only:
         if args.output:
             parser.error("V režimu --diagnostics-only vynechte cestu výstupního TAP.")
@@ -55,8 +74,10 @@ def main():
         if args.plot:
             plot_window(audio, fs, [], [], args.plot_start, duration)
         diagnostics = [] if args.plot else None
-        blocks, issues = decode_audio(audio, fs, headerless=args.headerless, diagnostics=diagnostics)
+        blocks, issues = decode_audio(audio, fs, headerless=args.headerless, diagnostics=diagnostics,
+                                     equalizer=equalizer)
         report = dict(sample_rate=fs, channels=audio.shape[1], headerless=args.headerless,
+                      equalizer=equalizer.summary() if equalizer is not None else None,
                       blocks=[block.summary() for block in blocks],
                       issues=[asdict(issue) for issue in issues])
         if args.report:

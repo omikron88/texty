@@ -11,7 +11,9 @@ import struct
 import numpy as np
 from scipy.io import wavfile
 from scipy.ndimage import maximum_filter1d, uniform_filter1d
-from scipy.signal import butter, find_peaks, sosfilt, sosfiltfilt, sosfilt_zi, sosfreqz
+from scipy.signal import butter, find_peaks, freqz, sosfilt, sosfiltfilt, sosfilt_zi, sosfreqz
+
+from .equalizer import EqualizerSettings, apply_equalizer, design_equalizer
 
 CLOCK = 3_500_000
 PILOT = 2168 / CLOCK
@@ -40,6 +42,7 @@ class Block:
     detector: str = "zero_crossing"
     lowpass_hz: float | None = None
     noise_multiplier: float = 3.0
+    equalized: bool = False
 
     def summary(self):
         result = asdict(self)
@@ -63,6 +66,7 @@ class Issue:
     detector: str = "zero_crossing"
     lowpass_hz: float | None = None
     noise_multiplier: float = 3.0
+    equalized: bool = False
 
 
 @dataclass
@@ -83,6 +87,7 @@ class DetectionTrace:
     detector: str = "zero_crossing"
     lowpass_hz: float | None = None
     analysis: SignalAnalysis | None = None
+    equalized: bool = False
 
 
 @dataclass
@@ -90,6 +95,7 @@ class ChannelDiagnostics:
     channel: int
     analysis: SignalAnalysis
     traces: list[DetectionTrace]
+    equalizer: EqualizerSettings | None = None
 
 
 def read_wav(path):
@@ -115,7 +121,17 @@ def read_wav(path):
     return fs, audio
 
 
-def prepare_signal(audio, fs):
+def estimate_noise(audio):
+    """Estimate input white noise from robust second differences."""
+    difference = np.diff(audio, n=2)
+    if not len(difference):
+        return 0.0
+    difference = difference[::max(1, len(difference) // 200_000)]
+    return float(np.median(np.abs(difference - np.median(difference)))
+                 / (0.67449 * np.sqrt(6)))
+
+
+def prepare_signal(audio, fs, *, noise=None, noise_response=None):
     """Prepare the same filtered signal for all thresholds and optional plots.
 
     A causal high pass removes slow DC drift without allowing the following
@@ -127,12 +143,13 @@ def prepare_signal(audio, fs):
         return SignalAnalysis(np.zeros_like(audio), np.zeros_like(audio), 0.0)
     highpass = butter(2, 40, btype="highpass", fs=fs, output="sos")
     signal, _ = sosfilt(highpass, audio, zi=sosfilt_zi(highpass) * audio[0])
-    # Estimate noise before low-pass filtering; subsample for long recordings.
-    difference = np.diff(audio, n=2)
-    difference = difference[::max(1, len(difference) // 200_000)]
-    noise = np.median(np.abs(difference - np.median(difference))) / (0.67449 * np.sqrt(6))
+    if noise is None:
+        noise = estimate_noise(audio)
     lowpass = butter(2, min(10000, fs * 0.4), fs=fs, output="sos")
     signal = sosfiltfilt(lowpass, signal)
+    if noise_response is not None:
+        _, response = sosfreqz(lowpass, worN=len(noise_response))
+        noise *= float(np.sqrt(np.mean(np.abs(noise_response) ** 2 * np.abs(response) ** 4)))
     window = max(3, round(fs * 0.01))
     envelope = uniform_filter1d(maximum_filter1d(np.abs(signal), window), window)
     return SignalAnalysis(signal, envelope, float(noise))
@@ -226,17 +243,20 @@ def edge_times(audio, fs, threshold_fraction=0.06):
     return detect_edges(prepare_signal(audio, fs), fs, threshold_fraction)
 
 
-def prepare_extrema_signal(audio, fs, cutoff, noise):
+def prepare_extrema_signal(audio, fs, cutoff, noise, *, noise_response=None):
     """Filter once per cutoff and project white input noise into that bandwidth."""
     highpass = butter(2, 40, btype="highpass", fs=fs, output="sos")
     filtered, _ = sosfilt(highpass, audio, zi=sosfilt_zi(highpass) * audio[0])
     lowpass = butter(4, cutoff, fs=fs, output="sos")
     filtered = sosfiltfilt(lowpass, filtered)
     envelope = maximum_filter1d(np.abs(filtered), round(fs * .002))
-    _, response = sosfreqz(lowpass, worN=2048)
+    _, response = sosfreqz(lowpass, worN=2048 if noise_response is None else len(noise_response))
     # Forward/backward filtering squares the amplitude response. Integrating
     # its fourth power gives the variance gain for white input noise.
-    noise_gain = float(np.sqrt(np.mean(np.abs(response) ** 4)))
+    variance_response = np.abs(response) ** 4
+    if noise_response is not None:
+        variance_response *= np.abs(noise_response) ** 2
+    noise_gain = float(np.sqrt(np.mean(variance_response)))
     return SignalAnalysis(filtered, envelope, noise * noise_gain)
 
 
@@ -426,58 +446,87 @@ def extrema_consensus(candidates):
         and same_recording_block(peer, block) for peer in candidates)]
 
 
-def decode_audio(audio, fs, *, headerless=False, diagnostics=None):
-    """Decode normally; optionally append the actual detector traces to a list."""
+def _decode_signal(signal, fs, channel, *, headerless, collect_traces,
+                   equalized=False, noise=None, noise_response=None):
+    analysis = prepare_signal(signal, fs, noise=noise, noise_response=noise_response)
+    input_noise = analysis.noise if noise is None else noise
+    traces = []
+    channel_blocks, channel_issues = [], []
+    for fraction in (0.06, 0.025, 0.12):
+        edges = detect_edges(analysis, fs, fraction)
+        blocks, issues = decode_edges(edges, channel, headerless=headerless)
+        for block in blocks:
+            block.threshold_fraction = fraction
+        for issue in issues:
+            issue.threshold_fraction = fraction
+        channel_blocks.extend(blocks)
+        channel_issues.extend(issues)
+        if collect_traces:
+            traces.append(DetectionTrace(fraction, edges, analysis=analysis if equalized else None,
+                                         equalized=equalized))
+    if not channel_blocks or any(not issue_covered(issue, channel_blocks) for issue in channel_issues):
+        alternative_blocks = []
+        for cutoff in (3500, 5000):
+            filtered = prepare_extrema_signal(signal, fs, cutoff, input_noise,
+                                              noise_response=noise_response)
+            for fraction, noise_multiplier in ((.08, 3), (.04, 3), (.02, 3), (.005, 1)):
+                # The sensitive attempt still needs complete XOR-verified
+                # bytes from both cutoffs. Share large arrays between trials.
+                trial = replace(filtered, noise_multiplier=noise_multiplier)
+                trace = detect_extrema(trial, fs, cutoff, fraction)
+                trace.equalized = equalized
+                blocks, issues = decode_edges(trace.edges, channel, headerless=headerless,
+                                              detector="extrema")
+                for event in [*blocks, *issues]:
+                    event.threshold_fraction = trace.threshold_fraction
+                    event.detector = trace.detector
+                    event.lowpass_hz = trace.lowpass_hz
+                    event.noise_multiplier = noise_multiplier
+                alternative_blocks.extend(blocks)
+                channel_issues.extend(issues)
+                if collect_traces:
+                    traces.append(trace)
+        confirmed = extrema_consensus(alternative_blocks)
+        channel_blocks.extend(confirmed)
+        for block in alternative_blocks:
+            if block not in confirmed:
+                channel_issues.append(Issue(block.start, block.end, channel,
+                                            "Blok z extrémů nemá potvrzení druhým filtrem.",
+                                            block.threshold_fraction, block.detector, block.lowpass_hz,
+                                            block.noise_multiplier))
+    for event in [*channel_blocks, *channel_issues]:
+        event.equalized = equalized
+    return channel_blocks, channel_issues, analysis, traces
+
+
+def decode_audio(audio, fs, *, headerless=False, diagnostics=None, equalizer=None):
+    """Merge verified blocks from channels and optional equalized attempts."""
     if audio.ndim == 1:
         audio = audio[:, None]
+    coefficients, noise_response = None, None
+    if equalizer is not None:
+        coefficients = design_equalizer(fs, equalizer)
+        _, noise_response = freqz(coefficients, worN=2048)
     candidates, failures = [], []
     for channel in range(audio.shape[1]):
-        analysis = prepare_signal(audio[:, channel], fs)
-        traces = []
-        channel_blocks, channel_issues = [], []
-        for fraction in (0.06, 0.025, 0.12):
-            edges = detect_edges(analysis, fs, fraction)
-            blocks, issues = decode_edges(edges, channel, headerless=headerless)
-            for block in blocks:
-                block.threshold_fraction = fraction
-            for issue in issues:
-                issue.threshold_fraction = fraction
-            channel_blocks.extend(blocks)
-            channel_issues.extend(issues)
-            if diagnostics is not None:
-                traces.append(DetectionTrace(fraction, edges))
-        if not channel_blocks or any(not issue_covered(issue, channel_blocks) for issue in channel_issues):
-            alternative_blocks = []
-            for cutoff in (3500, 5000):
-                filtered = prepare_extrema_signal(audio[:, channel], fs, cutoff, analysis.noise)
-                for fraction, noise_multiplier in ((.08, 3), (.04, 3), (.02, 3), (.005, 1)):
-                    # The sensitive attempt still needs complete XOR-verified
-                    # bytes from both cutoffs. Share large arrays between trials.
-                    trial = replace(filtered, noise_multiplier=noise_multiplier)
-                    trace = detect_extrema(trial, fs, cutoff, fraction)
-                    blocks, issues = decode_edges(trace.edges, channel, headerless=headerless,
-                                                  detector="extrema")
-                    for event in [*blocks, *issues]:
-                        event.threshold_fraction = trace.threshold_fraction
-                        event.detector = trace.detector
-                        event.lowpass_hz = trace.lowpass_hz
-                        event.noise_multiplier = noise_multiplier
-                    alternative_blocks.extend(blocks)
-                    channel_issues.extend(issues)
-                    if diagnostics is not None:
-                        traces.append(trace)
-            confirmed = extrema_consensus(alternative_blocks)
-            channel_blocks.extend(confirmed)
-            for block in alternative_blocks:
-                if block not in confirmed:
-                    channel_issues.append(Issue(block.start, block.end, channel,
-                                                "Blok z extrémů nemá potvrzení druhým filtrem.",
-                                                block.threshold_fraction, block.detector, block.lowpass_hz,
-                                                block.noise_multiplier))
-        candidates.extend(channel_blocks)
-        failures.extend(channel_issues)
+        signal = audio[:, channel]
+        blocks, issues, analysis, traces = _decode_signal(
+            signal, fs, channel, headerless=headerless, collect_traces=diagnostics is not None)
+        candidates.extend(blocks)
+        failures.extend(issues)
+        if coefficients is not None:
+            # Equalization colors noise. Use the original input estimate and
+            # integrate the combined FIR/IIR response for each detector.
+            processed = apply_equalizer(signal, coefficients)
+            blocks, issues, _, eq_traces = _decode_signal(
+                processed, fs, channel, headerless=headerless,
+                collect_traces=diagnostics is not None, equalized=True,
+                noise=analysis.noise, noise_response=noise_response)
+            candidates.extend(blocks)
+            failures.extend(issues)
+            traces.extend(eq_traces)
         if diagnostics is not None:
-            diagnostics.append(ChannelDiagnostics(channel, analysis, traces))
+            diagnostics.append(ChannelDiagnostics(channel, analysis, traces, equalizer))
 
     groups = []
     for block in sorted(candidates, key=lambda b: (b.start, b.channel)):
@@ -489,11 +538,12 @@ def decode_audio(audio, fs, *, headerless=False, diagnostics=None):
             matching.append(block)
     selected, conflicts = [], []
     for group in groups:
-        block = next((candidate for candidate in group if candidate.detector == "zero_crossing"), group[0])
+        block = min(group, key=lambda candidate: (candidate.detector != "zero_crossing",
+                                                 candidate.equalized))
         if len({candidate.data for candidate in group}) != 1:
             # Even --allow-partial must never choose an ambiguous XOR collision.
             conflicts.append(Issue(block.start, block.end, block.channel,
-                                   "Kanály nebo prahy dávají rozdílné bloky s platným XOR."))
+                                   "Kanály nebo nastavení detektoru dávají rozdílné bloky s platným XOR."))
         else:
             selected.append(block)
 

@@ -73,8 +73,10 @@ def _trace_for_window(diagnostic, blocks, issues, start, end):
     fraction = event.threshold_fraction if event else 0.06
     detector = event.detector if event else "zero_crossing"
     cutoff = event.lowpass_hz if event else None
+    equalized = event.equalized if event else False
     trace = next(trace for trace in diagnostic.traces if trace.threshold_fraction == fraction
-                 and trace.detector == detector and trace.lowpass_hz == cutoff)
+                 and trace.detector == detector and trace.lowpass_hz == cutoff
+                 and trace.equalized == equalized)
     speed = relevant_blocks[0].speed if relevant_blocks else 1.0
     return trace, speed, bool(relevant_blocks)
 
@@ -146,6 +148,9 @@ def build_figure(audio, fs, blocks, issues, diagnostics, *, start=None, duration
         suffix = f" · zobrazeno {len(visible_edges)}/{len(edges)} hran" if len(edges) > 1500 else ""
         title = (f"Extrémy — filtr {trace.lowpass_hz:g} Hz, prominence {trace.threshold_fraction:g}"
                  if extrema else f"Detail — práh {trace.threshold_fraction:g} × obálka")
+        if trace.equalized:
+            title += (f" · EQ {diagnostic.equalizer.gain_db:g} dB "
+                      f"/ {diagnostic.equalizer.high_hz:g} Hz")
         detail.set(title=title + suffix,
                    xlabel="Čas [s]", ylabel="Amplituda", xlim=(start, end))
         detail.legend(loc="upper right", fontsize=8, ncol=2)
